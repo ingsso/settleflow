@@ -11,12 +11,33 @@
 | Day | 작업 | 산출물 |
 |---|---|---|
 | 1 | 도메인 모델링: Order, OrderItem, Payment, Product 엔티티 설계 + ERD | ERD, 엔티티 클래스 |
-| 2 | 재고 차감 로직 — StagePass `SET NX PX` 패턴을 좌석→재고로 이식 | `InventoryLockService` |
-| 3 | Mock PG 서버 구축 (또는 토스페이먼츠 샌드박스 연동) | Mock PG API |
-| 4 | 웹훅 수신 엔드포인트 + `Idempotency-Key` 기반 Redis `SETNX` 중복 방어 | `WebhookController`, 통합테스트 |
+| 2 | ~~재고 차감 — StagePass `SET NX PX` 이식~~ → **Day 1 미검증 3건 실측 검증**으로 대체 | `RefundRaceTest`, `SchemaBehaviorTest` |
+| 3 | 스키마(Flyway) + 엔티티 클래스 + 재고 차감(원자적 조건부 UPDATE) | `V1__init_schema.sql`, 엔티티 6개 |
+| 4 | Mock PG 서버 + 웹훅 수신 엔드포인트 + `Idempotency-Key` 기반 Redis `SETNX` 중복 방어 | Mock PG API, `WebhookController` |
 | 5 | 주문→결제 전체 플로우 통합테스트 (Testcontainers) | 테스트 5건 이상, README 초안 |
 
 **주말 체크포인트**: 정상 주문 1건이 끝까지(주문→재고차감→결제→웹훅수신) 흐르는지 로컬에서 실제로 확인
+
+### ⚠️ 계획 수정 — 재고에 Redis 락을 쓰지 않기로 함 (2026-07-14, W1D3)
+
+원래 Day 2 항목은 *"StagePass `SET NX PX` 패턴을 좌석→재고로 이식"*이었으나, **이식이 성립하지 않는다**고 판단해 폐기했다. `InventoryLockService`는 만들지 않는다.
+
+**근거 — 두 문제는 시간의 모양이 다르다.**
+
+| | 좌석 선점 (StagePass) | 재고 차감 (SettleFlow) |
+|---|---|---|
+| 점유 시간 | **지속** — 결제창 입력 중 수 분간 물고 있어야 함 | **순간** — 요청 시점에 깎고 끝 |
+| DB 트랜잭션으로 되나 | ❌ 수 분간 커넥션·행 락 점유 → 풀 고갈 | ✅ `UPDATE ... WHERE stock >= :qty` 한 줄 |
+| 고객 이탈 시 | 아무도 안 풀어줌 → **자동 만료 필요**(`PX`) | 애초에 잡은 게 없음 |
+
+즉 Redis `SET NX PX`가 풀던 건 **동시성(정합성)이 아니라 "시간"**이었다. 정합성은 원자적 조건부 UPDATE로 DB가 이미 보장한다 — **W1D2 `RefundRaceTest`에서 같은 모양의 SQL로 실측 완료**(성공 1건 / 최종 8000, 가드 제거 시 11000).
+
+재고에 Redis를 얹으면 아무것도 더 지키지 못하면서 **재고의 진실이 Redis와 DB 둘로 갈라진다** — 이 프로젝트의 주제(정합성·대사)와 정면 충돌.
+
+**채택: 주문 생성 시 원자적 차감 + 미결제 주문 쓸이 배치로 복원.**
+쓸이 배치는 "느린 TTL"이 아니라 **"조회할 줄 아는 TTL"**이다 — 복원 전에 PG에 조회해서 *"정말 결제 안 된 게 맞나"*를 확인해야 한다. 타이머만 믿고 복원하면 승인된 결제의 재고를 되돌려 **이중판매**가 난다(W1D1 §3: `UNKNOWN`은 실패가 아니라 정보의 부재).
+
+**"Redis 락이 정말 필요한가"는 Week 4 k6로 측정해서 답한다.** 인기 상품 1건에 동시 부하를 걸어 DB 행 락 경합이 실제 병목인지 재보고, 병목일 때만 재고려. 추측이 아니라 수치로.
 
 ---
 

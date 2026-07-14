@@ -39,7 +39,7 @@
 
 - Day 1: 결제 도메인 설계 확정 → [W1D1_결제_도메인_설계.md](W1D1_결제_도메인_설계.md). ERD·엔티티 클래스는 미착수(Day 2로 이월)
 - Day 2: Day1 미검증 3건을 Testcontainers로 **실측 검증**(미검증→0). `RefundRaceTest`(조건부 UPDATE 레이스+음성 대조군), `SchemaBehaviorTest`(서브쿼리 CHECK 거부/NULL unique). 커밋 `b3227ee` push. ERD·엔티티는 여전히 이월
-- Day 3: 
+- Day 3: 스키마 확정 → [W1D3_스키마_확정.md](W1D3_스키마_확정.md). `V1__init_schema.sql`(테이블 6개) + `ProductStockConstraintTest`(숙제). **계획서의 "재고 Redis 락" 전제를 근거를 갖고 폐기**. 엔티티는 Day 4로
 - Day 4: 
 - Day 5: 
 

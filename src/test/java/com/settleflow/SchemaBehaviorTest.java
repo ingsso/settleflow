@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import org.testcontainers.junit.jupiter.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import com.settleflow.support.TestImages;
+
 import java.sql.*;
 
 import static org.assertj.core.api.Assertions.*;
@@ -19,7 +21,7 @@ import static org.assertj.core.api.Assertions.*;
 class SchemaBehaviorTest {
 
     @Container
-    static PostgreSQLContainer<?> pg = new PostgreSQLContainer<>("postgres:16");
+    static PostgreSQLContainer<?> pg = new PostgreSQLContainer<>(TestImages.POSTGRES);
 
     private Connection newConn() throws SQLException {
         return DriverManager.getConnection(

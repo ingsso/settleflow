@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import org.testcontainers.junit.jupiter.*;
 import org.testcontainers.containers.PostgreSQLContainer;
 
+import com.settleflow.support.TestImages;
+
 import java.sql.*;
 import java.util.concurrent.*;
 
@@ -25,7 +27,7 @@ class RefundRaceTest {
 
     // 테스트가 자기 전용 Postgres를 띄운다 (시작 시 기동, 끝나면 자동 폐기)
     @Container
-    static PostgreSQLContainer<?> pg = new PostgreSQLContainer<>("postgres:16");
+    static PostgreSQLContainer<?> pg = new PostgreSQLContainer<>(TestImages.POSTGRES);
 
     // 컨테이너에 새 커넥션 하나 여는 헬퍼 (스레드마다 각자 부르면 독립 트랜잭션)
     private Connection newConn() throws SQLException {
