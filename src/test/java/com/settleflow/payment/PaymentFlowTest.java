@@ -5,6 +5,7 @@ import com.settleflow.order.repository.OrderRepository;
 import com.settleflow.payment.api.PgEventType;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.PaymentStatus;
+import com.settleflow.payment.domain.TransitionResult;
 import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.payment.service.PaymentService;
 import com.settleflow.payment.service.PaymentTransitionService;
@@ -36,8 +37,7 @@ import java.util.function.IntUnaryOperator;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.times;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.*;
 
 /**
  * W1D4 통합 실측 — 주문→결제→웹훅 전체 플로우와 웹훅 멱등성.
@@ -168,6 +168,28 @@ class PaymentFlowTest extends IntegrationTestSupport {
     //   기대: version 이 1이 아니라 N 근처로 튄다 = 이중 부수효과(정합성 붕괴).
     //   확인했으면 반드시 원복. "SETNX가 아니라 backbone이 정합성을 지킨다"의 증거.
     // ====================================================================
+
+    @Test
+    void 음성대조군B_동시_중복이어도_실제_전이는_1회() throws Exception {
+        long orderId = createOrder(10_000L);
+        UUID mpid = createPendingPayment(orderId, 10_000L);
+
+        AtomicInteger transitioned = new AtomicInteger();
+        doAnswer(inv -> {
+            var r = (TransitionResult) inv.callRealMethod();
+            if (r == TransitionResult.TRANSITIONED) transitioned.incrementAndGet();
+            return r;
+        }).when(transitions).applyApproved(any(), any());
+
+        int n = 20;
+        int ok = blast(n, i -> postWebhook("evt-" + i, PgEventType.APPROVED, mpid, "pg_tx_4", 10_000L));
+
+        Payment p = reload(mpid);
+        System.out.printf("[실측:음성대조군B] 다른 eventId %d개 동시 → HTTP200 %d개, 최종 status=%s version=%d%n",
+                n, ok, p.getStatus(), p.getVersion());
+
+        assertThat(transitioned.get()).isEqualTo(1);
+    }
 
     // ---------- helpers ----------
 
