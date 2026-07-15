@@ -30,6 +30,16 @@ public class Payment {
     @Enumerated(EnumType.STRING)
     private PaymentStatus status;
 
+    /**
+     * 낙관적 락. 전이표의 backbone(W1D4).
+     * 동시에 두 사건이 같은 PENDING 을 전이시키려 하면, 먼저 커밋한 쪽이 version 을 올리고
+     * 나중 쪽 save 는 version 불일치로 OptimisticLockException — 재조회하면 이미 종착지라
+     * on*() 가 IGNORED 를 돌려준다. 부수효과(분개 등)가 한 번만 실행됨을 보장한다.
+     */
+    @Version
+    @Column(name = "version", nullable = false)
+    private Long version;
+
     @Column(name = "amount", nullable = false)
     private Long amount;
 
@@ -75,8 +85,23 @@ public class Payment {
         return TransitionResult.TRANSITIONED;
     }
 
-    public void linkPgTransaction(String pgTransactionId) {
-        this.pgTransactionId = pgTransactionId;
+    /**
+     * PG 거래번호를 연결한다. 처음이면 채우고, 같은 값이 또 오면 그대로 둔다(멱등).
+     *
+     * 이미 <b>다른</b> 번호가 있는데 새 번호가 오면 모순이다(D3 미결 #4) — 같은 결제에
+     * PG 거래번호가 둘일 리 없다. 조용히 덮어쓰지 않고 false 로 알린다. 호출부가 알람을 울린다.
+     *
+     * @return true = 연결됨/이미 같음(정상), false = 기존과 다른 번호(모순)
+     */
+    public boolean linkPgTransaction(String pgTransactionId) {
+        if (pgTransactionId == null || pgTransactionId.equals(this.pgTransactionId)) {
+            return true;
+        }
+        if (this.pgTransactionId == null) {
+            this.pgTransactionId = pgTransactionId;
+            return true;
+        }
+        return false;   // 기존에 다른 번호가 있다 — 덮어쓰지 않는다
     }
 
     @PrePersist
