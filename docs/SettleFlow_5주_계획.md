@@ -14,9 +14,14 @@
 | 2 | ~~재고 차감 — StagePass `SET NX PX` 이식~~ → **Day 1 미검증 3건 실측 검증**으로 대체 | `RefundRaceTest`, `SchemaBehaviorTest` |
 | 3 | 스키마(Flyway) + 엔티티 클래스 + 재고 차감(원자적 조건부 UPDATE) | `V1__init_schema.sql`, 엔티티 6개 |
 | 4 | Mock PG 서버 + 웹훅 수신 엔드포인트 + `Idempotency-Key` 기반 Redis `SETNX` 중복 방어 | Mock PG API, `WebhookController` |
-| 5 | 주문→결제 전체 플로우 통합테스트 (Testcontainers) | 테스트 5건 이상, README 초안 |
+| 5 | **전체 플로우 배선**: `OrderService`(주문+재고차감을 한 진입점) → 결제 연결 + 주문 REST 엔드포인트 + `Order` 가드. (통합테스트는 W1D4 `PaymentFlowTest`로 사실상 완료) | `OrderService`, 주문 엔드포인트, README 초안 |
 
 **주말 체크포인트**: 정상 주문 1건이 끝까지(주문→재고차감→결제→웹훅수신) 흐르는지 로컬에서 실제로 확인
+
+> **일정 정밀화 (2026-07-15, W1D4 종료 시점)**: 결제 코어·웹훅 멱등·동시성은 W1D4에 완료. 남은 건 **배선과 문서**라 가볍다. 조각들이 아직 따로 논다 — `InventoryService`(재고차감)와 `PaymentService.pay`(결제)가 한 진입점으로 안 묶였고, 로컬 실행용 주문 엔드포인트가 없다(웹훅 엔드포인트뿐).
+> - **목(7/16) = 배선**: 위 조각을 관통시켜 "돌아가는 흐름"까지만. **README·리팩터는 넣지 않는다**(끼우면 흐름 완성이 밀린다).
+> - **금(7/17) = 점검**: `docker-compose up`으로 앱 띄워 실제 1건 관통(= 위 체크포인트를 금요일로 당김) + 첫 e2e에서 나오는 잔버그(트랜잭션 경계·LAZY 로딩·`application.yaml` Redis/Postgres 연결) 수정 + README.
+> - **주말 = 버퍼.** 새 개념(Kafka·Ledger)은 Week 2 것이라 Day 5는 막힐 데가 적다.
 
 ### ⚠️ 계획 수정 — 재고에 Redis 락을 쓰지 않기로 함 (2026-07-14, W1D3)
 
