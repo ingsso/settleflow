@@ -40,7 +40,7 @@
 - Day 1: 결제 도메인 설계 확정 → [W1D1_결제_도메인_설계.md](W1D1_결제_도메인_설계.md). ERD·엔티티 클래스는 미착수(Day 2로 이월)
 - Day 2: Day1 미검증 3건을 Testcontainers로 **실측 검증**(미검증→0). `RefundRaceTest`(조건부 UPDATE 레이스+음성 대조군), `SchemaBehaviorTest`(서브쿼리 CHECK 거부/NULL unique). 커밋 `b3227ee` push. ERD·엔티티는 여전히 이월
 - Day 3: 스키마·엔티티·재고차감 → [W1D3_스키마_확정.md](W1D3_스키마_확정.md). `V1__init_schema.sql`(6테이블) + 엔티티 6개 + `InventoryService`. **계획서의 "재고 Redis 락" 전제를 근거를 갖고 폐기** → 실측으로 증명(**동시 10명/재고 3 → 성공 3, 초과판매 0**). 테스트 10건 통과. 다만 `onTimedOut()`에서 **종착지가 움직이는 오류를 세 번째 반복**(W1D1 경고 패턴)
-- Day 4: 
+- Day 4: Mock PG + 웹훅 멱등 → [W1D4_웹훅_멱등.md](W1D4_웹훅_멱등.md). 인프로세스 스텁(매직금액)·`PaymentService`(PENDING 선커밋)·`PaymentTransitionService`(낙관적 락)·`WebhookController`(SETNX). **SETNX=fast-path / backbone=상태가드+@Version 를 실측으로 분리**(같은 eventId 20 → 처리 1 / 다른 eventId 20 → 호출 20·version 1 / 가드 제거 → TRANSITIONED 20). 전체 14건 통과. 커밋 `81144c7`·`13cd153`·`1ad8243`. **음성대조군 B를 3세션 만에 직접 손으로 돌려 빨간불 확인**(단 카운터를 blast 뒤에 설치해 한 번 헛돎 → 순서 고침)
 - Day 5: 
 
 ### [Week 1 / Day 1] 오늘 한 일
@@ -99,10 +99,6 @@
 
 ### [Week 1 / Day 3] 오늘 한 일
 
-> ⚠️ 이 항목은 **본인 자기보고가 아니라 Claude가 대화 기록에서 재구성한 것**이다.
-> 원래 이 템플릿은 본인이 채우고 Claude가 교차검증하는 구조 — 둘 다 Claude가 쓰면
-> "혼자 푼 것" 같은 항목은 검증할 상대가 없어진다. 기억과 다른 부분은 직접 고칠 것.
-
 1. 설계 먼저 혼자 해봄: **부분적**
    - **했음**: DDL 5테이블을 직접 타이핑(Claude는 `product` 예시 1개만 제시). `GENERATED ALWAYS AS IDENTITY`는 Claude가 쓴 `BIGSERIAL`보다 나은 선택이었음. `total_amount` 저장/`quantity > 0` 판단, `seller` 테이블 필요성도 스스로 추가
    - **못 했음**: `PaymentAnomaly` 컬럼 구성 질문에서 "뭘 말하는지 모르겠다"고 막힘 → Claude가 시기상조라 판단하고 Week 3으로 연기. ERD 툴 export를 **두 번** 플레이스홀더(`Key`/`Field`) 상태로 제출
@@ -154,6 +150,25 @@
 - [ ] 파일을 바꿨으면 **말하기**
 
 **주간 회고**: 이번 주 가장 헷갈렸던 개념 / 다음 주에 넘길 숙제
+
+### [Week 1 / Day 4] 오늘 한 일
+
+1. 설계 먼저 혼자 해봄: 부분적으로 했음
+    - 안 했다면 이유:
+
+2. 코드 받고 내 말로 재설명 시도: (했음 / 안함)
+    - 재설명 못 한 부분:
+
+3. AI 없이 혼자 푼 것: SETNX 순서·crash 구멍·backbone을 스스로 짚음, 관측 "둘 다" 선택, 그리고
+   음성대조군 B를 3세션 만에 직접 손으로 돌려 빨간불을 봄.
+
+4. AI 활용 로그 3줄:
+    - AI 제안했지만 내가 거부/수정한 것:
+    - AI 도움으로 처음 알게 된 개념:
+    - 완전히 혼자 해결한 문제:
+
+5. 선택지+트레이드오프로 물어봄: (했음 / 안함)
+    - 물어본 질문:
 
 ---
 
