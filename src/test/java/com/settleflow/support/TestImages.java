@@ -7,6 +7,7 @@ package com.settleflow.support;
 public final class TestImages {
 
     public static final String POSTGRES = "postgres:17";
+    public static final String REDIS = "redis:7";
 
     private TestImages() {
     }
