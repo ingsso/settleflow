@@ -60,11 +60,43 @@ public class Order {
         return item;
     }
 
-    public void markPaid() {
+    /**
+     * 결제 확정 사건. 전이표(W1D5):
+     *
+     * <pre>
+     *   현재 \ 사건 | 결제확정  | 취소
+     *   CREATED    | → PAID   | → CANCELED
+     *   PAID       | IGNORED  | 미정
+     *   CANCELED   | CONFLICT | IGNORED
+     * </pre>
+     *
+     * <p>거절은 열에 없다 — 결제가 거절돼도 주문은 CREATED 로 남는다. Order↔Payment 가 1:N 인
+     * 이유가 그것이다(W1D1): 실패 기록을 보존하고 재결제를 허용한다.
+     *
+     * <p><b>CANCELED + 결제확정 = CONFLICT.</b> 쓸이 배치가 주문을 취소하며 재고를 복원한 뒤
+     * 늦은 승인 웹훅이 도착한 경우다. 재고는 이미 남에게 갔는데 주문만 PAID 가 되면 이중판매다
+     * (W1D3 §2). 상태를 바꾸지 않고 호출부가 기록·알람하게 한다(W1D1 §4 규칙 2).
+     *
+     * <p><b>예외를 던지지 않는 이유</b>: 이 메서드는 결제 전이 트랜잭션 안에서 불린다
+     * ({@code PaymentTransitionService#dispatch}). 예외를 던지면 PENDING → PAID 전이까지 롤백되어
+     * <i>"결제는 승인됐다"</i>는 사실 자체가 사라진다 — CONFLICT 칸에서 반드시 남겨야 하는 것을
+     * 예외가 지운다(W1D3 §5와 같은 이유).
+     */
+    public OrderTransitionResult onPaymentConfirmed() {
+        if (this.status == OrderStatus.PAID) return OrderTransitionResult.IGNORED;
+        else if (this.status == OrderStatus.CANCELED) return OrderTransitionResult.CONFLICT;
+
         this.status = OrderStatus.PAID;
-        this.updatedAt = OffsetDateTime.now();
+        return OrderTransitionResult.TRANSITIONED;
     }
 
+    /**
+     * 주문 취소. <b>아직 호출부가 없다</b> — 쓸이 배치도 취소 API 도 없다.
+     *
+     * <p>가드를 넣지 않은 이유: 전이표의 PAID+취소 칸이 미정이다. 그 칸은 "무시"가 아니라
+     * "요청을 거절한다"에 가까운데(IGNORED 를 주면 호출부는 취소된 줄 안다), 결과값을 뭘로 할지는
+     * 호출부가 그걸로 뭘 하는지 봐야 정해진다. 호출부가 생길 때 함께 확정한다.
+     */
     public void cancel() {
         this.status = OrderStatus.CANCELED;
         this.updatedAt = OffsetDateTime.now();

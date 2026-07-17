@@ -1,5 +1,7 @@
 package com.settleflow.payment.service;
 
+import com.settleflow.order.domain.Order;
+import com.settleflow.order.domain.OrderTransitionResult;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.TransitionResult;
 import com.settleflow.payment.repository.PaymentRepository;
@@ -19,7 +21,7 @@ import java.util.function.Function;
  *
  * <p><b>엔티티가 전이표를 소유하고(on*), 이 서비스가 재시도와 부수효과를 소유한다.</b>
  * 동기 승인(pay())과 웹훅 승인이 같은 PENDING 을 동시에 전이시켜도, 낙관적 락으로 한 쪽만
- * 성공하고 진 쪽은 재조회 → 종착지 → IGNORED 로 끝난다. 부수효과(markPaid 등)는 한 번만 실행된다.
+ * 성공하고 진 쪽은 재조회 → 종착지 → IGNORED 로 끝난다. 부수효과(주문 전이 등)는 한 번만 실행된다.
  *
  * <p>SETNX(웹훅 멱등키)는 fast-path 일 뿐이고, 정합성의 최종 보증은 여기다 — SETNX 를 빠져나온
  * 중복(동기+웹훅 겹침, 다른 eventId 로 온 재승인)도 이 층에서 걸린다("두 겹").
@@ -39,11 +41,21 @@ public class PaymentTransitionService {
         this.txTemplate = new TransactionTemplate(txManager);
     }
 
-    /** 승인 확정. TRANSITIONED 면 주문을 PAID 로. pgTransactionId 는 웹훅이 실어온다(동기 경로는 null). */
+    /**
+     * 승인 확정. TRANSITIONED 면 주문에 결제확정 사건을 전한다.
+     * pgTransactionId 는 웹훅이 실어온다(동기 경로는 null).
+     *
+     * <p>주문이 이미 취소돼 있으면 CONFLICT 다 — 결제 전이는 그대로 커밋하고(승인은 사실이다)
+     * 이상만 기록한다. 자세한 근거는 {@link Order#onPaymentConfirmed()}.
+     */
     public TransitionResult applyApproved(UUID merchantPaymentId, String pgTransactionId) {
         return dispatch(merchantPaymentId, pgTransactionId,
                 Payment::onApproved,
-                payment -> payment.getOrder().markPaid());
+                payment -> {
+                    if (payment.getOrder().onPaymentConfirmed() == OrderTransitionResult.CONFLICT) {
+                        recordOrderAnomaly(payment);
+                    }
+                });
     }
 
     /** 거절 확정. 주문은 CREATED 로 남는다(미결제 쓸이·취소가 나중에 처리). */
@@ -96,5 +108,15 @@ public class PaymentTransitionService {
     private void recordAnomaly(Payment payment, TransitionResult result, boolean linkOk) {
         log.warn("[ANOMALY] paymentId={} status={} result={} linkConflict={} — 사람이 확인해야 함",
                 payment.getId(), payment.getStatus(), result, !linkOk);
+    }
+
+    /**
+     * 주문 전이 모순. 취소된 주문에 결제 승인이 확정됐다 — 재고는 이미 복원돼 남에게 갔는데
+     * 돈은 받은 상태다(이중판매). 결제 쪽은 정상 전이라 recordAnomaly 가 안 잡는다.
+     */
+    private void recordOrderAnomaly(Payment payment) {
+        Order order = payment.getOrder();
+        log.warn("[ANOMALY] orderId={} orderStatus={} paymentId={} — 취소된 주문에 결제 승인 확정. 사람이 확인해야 함",
+                order.getId(), order.getStatus(), payment.getId());
     }
 }

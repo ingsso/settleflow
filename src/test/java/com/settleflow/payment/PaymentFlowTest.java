@@ -191,6 +191,55 @@ class PaymentFlowTest extends IntegrationTestSupport {
         assertThat(transitioned.get()).isEqualTo(1);
     }
 
+    // ---------- 5. 취소된 주문에 늦은 승인 웹훅 → 주문 전이 CONFLICT (W1D5) ----------
+
+    /**
+     * 쓸이 배치가 미결제 주문을 취소하며 재고를 복원한 뒤, 늦은 승인 웹훅이 도착하는 경우.
+     * 재고는 이미 남에게 갔는데 주문까지 PAID 가 되면 <b>이중판매</b>다(W1D3 §2).
+     *
+     * <p>단언 둘이 각각 다른 것을 지킨다:
+     * <ul>
+     *   <li>주문이 CANCELED 로 남는다 = <b>가드가 산다</b>. 없으면 PAID 로 덮인다.
+     *   <li>결제가 PAID 로 커밋된다 = <b>승인은 사실이므로 롤백되면 안 된다</b>.
+     *       onPaymentConfirmed() 가 예외를 던지면 이 단언이 PENDING 을 보고 빨간불이 된다.
+     * </ul>
+     */
+    @Test
+    void 취소된_주문에_늦은_승인웹훅이_오면_주문은_CANCELED로_남고_결제만_PAID된다() {
+        long orderId = createOrder(10_000L);
+        UUID mpid = createPendingPayment(orderId, 10_000L);
+        cancelOrder(orderId);                 // 쓸이 배치가 취소 + 재고 복원한 상황
+
+        int status = postWebhook("evt-late-cancel", PgEventType.APPROVED, mpid, "pg_tx_5", 10_000L);
+
+        Payment p = reload(mpid);
+        System.out.printf("[실측] 취소된 주문에 늦은 승인웹훅 → HTTP%d, order=%s payment=%s%n",
+                status, orderStatus(orderId), p.getStatus());
+
+        assertThat(status).isEqualTo(200);                          // 모순도 200 — PG 재전송을 멈춘다
+        assertThat(orderStatus(orderId)).isEqualTo("CANCELED");     // 가드: 종착지를 안 떠난다
+        assertThat(p.getStatus()).isEqualTo(PaymentStatus.PAID);    // 승인은 사실 → 커밋됨(롤백 아님)
+    }
+
+    // ====================================================================
+    // 음성대조군 C (수동, "화재감지기에 연기") — 본인이 직접 돌려볼 것.
+    // 시나리오 5의 단언 둘이 각각 진짜로 빨간불을 낼 수 있는지 따로 확인한다.
+    //
+    //   C-1. 가드가 일하고 있나
+    //        Order.onPaymentConfirmed() 의 `if (status==CANCELED) return CONFLICT;` 를 잠깐 주석 처리.
+    //        기대: order 가 CANCELED 가 아니라 PAID 로 덮여 빨간불 = 이중판매 구멍이 열린 것.
+    //
+    //   C-2. 예외를 던지면 안 된다던 그 근거가 맞나
+    //        같은 자리에서 CONFLICT 를 돌려주는 대신 예외를 던지게 바꿔본다.
+    //        기대: 결제가 PAID 가 아니라 PENDING 이라 빨간불 = 롤백이 "승인됐다"는 사실을 지운 것.
+    //
+    //   둘 다 확인했으면 반드시 원복.
+    //
+    // 아직 못 보는 것(정직한 한계): CONFLICT 가 기록되는지는 이 테스트가 모른다.
+    //   recordOrderAnomaly 는 지금 로그뿐이라 셀 수 있는 상태가 없다 — 가드는 두고 기록만 지워도 초록불이다.
+    //   Week 3 에서 이상 테이블이 생기면 "행 1개"로 단언 가능해진다(D4 §6의 version 사각과 같은 모양).
+    // ====================================================================
+
     // ---------- helpers ----------
 
     long createOrder(long unitPrice) {
@@ -215,6 +264,11 @@ class PaymentFlowTest extends IntegrationTestSupport {
             em.flush();
             return p.getMerchantPaymentId();
         });
+    }
+
+    /** 쓸이 배치·취소 API 가 아직 없어서 여기서 직접 취소한다(W1D5 — cancel() 호출부는 Week 2). */
+    void cancelOrder(long orderId) {
+        tx.executeWithoutResult(s -> em.find(Order.class, orderId).cancel());
     }
 
     /** 실제 HTTP 로 웹훅을 쏜다. 반환값은 HTTP 상태코드. */
