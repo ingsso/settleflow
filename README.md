@@ -152,8 +152,8 @@ curl -X POST http://localhost:8080/orders \
 
 ## 문서
 
-설계 근거·실측 로그는 [`docs/`](docs/)에 날짜별로 기록:
-- `W1D1_결제_도메인_설계.md` — 전이표, Order↔Payment 1:N
-- `W1D3_스키마_확정.md` — 스키마·엔티티, Redis 락 폐기 근거
-- `W1D4_웹훅_멱등.md` — SETNX/backbone 두 겹
-- `W1D5_배선.md` — 전체 배선, 트랜잭션 경계
+설계 근거·실측 로그는 [`docs/`](docs/)에 주별 폴더로 기록. 주 무관 인덱스(5주 계획·체크리스트·기술결정)는 `docs/` 루트, daily 로그는 `docs/weekN/`:
+- [`week1/W1D1_결제_도메인_설계.md`](docs/week1/W1D1_결제_도메인_설계.md) — 전이표, Order↔Payment 1:N
+- [`week1/W1D3_스키마_확정.md`](docs/week1/W1D3_스키마_확정.md) — 스키마·엔티티, Redis 락 폐기 근거
+- [`week1/W1D4_웹훅_멱등.md`](docs/week1/W1D4_웹훅_멱등.md) — SETNX/backbone 두 겹
+- [`week1/W1D5_배선.md`](docs/week1/W1D5_배선.md) — 전체 배선, 트랜잭션 경계
