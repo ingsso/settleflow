@@ -236,7 +236,7 @@
 
 ## Week 2 — 이중장부(Ledger) + 부분환불 상태머신
 
-- Day 1: 
+- Day 1: 이중장부 설계 → [week2/W2D1_이중장부_설계.md](week2/W2D1_이중장부_설계.md). `journal`+`ledger_entry` 모델 확정(**C 방식** — 원인이 journal 을 FK 로 가리킴, 무결성 우선). 20,000 결제 3줄 분개 본인 도출, **B**(사건 단위 묶음)·**C** 를 근거로 선택, **polymorphic 의 FK 무결성 비용을 지적받고 재선택**(반박을 받아 재고 — 5세션째 패턴이 반대 방향으로 작동). journal 은 PAID 확정 시 생성(PENDING=null), W1D4 backbone 이 이중계상 방어. **DDL·엔티티는 이월(설계만, 코드·실측 없음)**.
 - Day 2: 
 - Day 3: 
 - Day 4: 
