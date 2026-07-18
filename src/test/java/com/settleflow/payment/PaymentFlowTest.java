@@ -141,10 +141,13 @@ class PaymentFlowTest extends IntegrationTestSupport {
         assertThat(p.getVersion()).isEqualTo(1L);                       // 실제 전이 1회
     }
 
-    // ---------- 4. 음성대조군 A: eventId 다르면 SETNX가 못 막는다(그래도 정합) ----------
+    // ---------- 4. eventId 다르면 SETNX가 못 막는다 — 그래도 backbone이 정합을 지킨다 ----------
+    // 아래 A·B 는 '다른 eventId 20개 동시'라는 같은 상황을 서로 다른 관측축으로 본다.
+    // 한 축이 눈멀 수 있어 둘 다 둔다(클래스 주석 §관측 두 축). 빨간불 증명은 B 아래 수동 절차.
 
+    // A — correctness 축(payment.version): SETNX 를 N회 우회당해도 실제 행 갱신은 1회로 수렴.
     @Test
-    void 음성대조군A_eventId가_다르면_전이시도는_N회지만_version은_1이다() throws Exception {
+    void 음성대조군A_다른eventId20개_SETNX못막아도_version은_1로_수렴() throws Exception {
         long orderId = createOrder(10_000L);
         UUID mpid = createPendingPayment(orderId, 10_000L);
 
@@ -160,17 +163,9 @@ class PaymentFlowTest extends IntegrationTestSupport {
         assertThat(p.getVersion()).isEqualTo(1L);                       // 그래도 backbone이 1회로 수렴
     }
 
-    // ====================================================================
-    // 음성대조군 B (수동, "화재감지기에 연기") — 본인이 직접 돌려볼 것:
-    //   backbone 을 잠깐 없애면 어떻게 되나.
-    //   방법: Payment.onApproved() 의 `if (status==PAID) return IGNORED;` 가드를 잠깐 주석 처리
-    //         (또는 Payment 의 @Version 을 잠깐 제거) 하고 시나리오 4를 다시 실행.
-    //   기대: version 이 1이 아니라 N 근처로 튄다 = 이중 부수효과(정합성 붕괴).
-    //   확인했으면 반드시 원복. "SETNX가 아니라 backbone이 정합성을 지킨다"의 증거.
-    // ====================================================================
-
+    // B — 부수효과 축(TRANSITIONED 횟수): 같은 상황에서 전이 부수효과가 실제로 몇 번 실행됐나 = 1회.
     @Test
-    void 음성대조군B_동시_중복이어도_실제_전이는_1회() throws Exception {
+    void 음성대조군B_다른eventId20개_부수효과TRANSITIONED는_1회() throws Exception {
         long orderId = createOrder(10_000L);
         UUID mpid = createPendingPayment(orderId, 10_000L);
 
@@ -190,6 +185,15 @@ class PaymentFlowTest extends IntegrationTestSupport {
 
         assertThat(transitioned.get()).isEqualTo(1);
     }
+
+    // ====================================================================
+    // 음성대조군 A·B 의 빨간불 확인(수동, "화재감지기에 연기") — 위 두 @Test 가
+    // 정말 실패를 낼 수 있는지 확인한다:
+    //   backbone 을 잠깐 없앤다 — Payment.onApproved() 의 `if (status==PAID) return IGNORED;`
+    //   가드를 주석 처리(또는 @Version 제거)하고 위 시나리오를 다시 돌린다.
+    //   기대: version(A)·TRANSITIONED 횟수(B) 가 1이 아니라 N 근처로 튄다 = 이중 부수효과.
+    //   → "SETNX가 아니라 backbone이 정합성을 지킨다"의 반증. 확인 후 반드시 원복.
+    // ====================================================================
 
     // ---------- 5. 취소된 주문에 늦은 승인 웹훅 → 주문 전이 CONFLICT (W1D5) ----------
 
