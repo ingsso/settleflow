@@ -1,5 +1,6 @@
 package com.settleflow.payment.domain;
 
+import com.settleflow.ledger.domain.Journal;
 import jakarta.persistence.*;
 import lombok.Getter;
 
@@ -27,6 +28,10 @@ public class Refund {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "payment_id", nullable = false)
     private Payment payment;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "journal_id", unique = true)
+    private Journal journal;
 
     @Column(name = "amount", nullable = false)
     private Long amount;

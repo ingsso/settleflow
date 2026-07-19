@@ -1,5 +1,6 @@
 package com.settleflow.payment.domain;
 
+import com.settleflow.ledger.domain.Journal;
 import com.settleflow.order.domain.Order;
 import jakarta.persistence.*;
 import lombok.Getter;
@@ -19,6 +20,10 @@ public class Payment {
     @ManyToOne(fetch = FetchType.LAZY, optional = false)
     @JoinColumn(name = "order_id", nullable = false)
     private Order order;
+
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "journal_id", unique = true)
+    private Journal journal;
 
     @Column(name = "merchant_payment_id", nullable = false, unique = true, updatable = false)
     private UUID merchantPaymentId;
