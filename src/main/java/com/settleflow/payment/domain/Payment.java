@@ -98,6 +98,14 @@ public class Payment {
      *
      * @return true = 연결됨/이미 같음(정상), false = 기존과 다른 번호(모순)
      */
+    /**
+     * 결제 확정 시 만들어진 분개(journal)를 연결한다. PENDING 동안엔 null 이고
+     * TRANSITIONED 부수효과에서 한 번만 세팅된다(W2D1 §3). journal_id 는 UNIQUE(V3).
+     */
+    public void linkJournal(Journal journal) {
+        this.journal = journal;
+    }
+
     public boolean linkPgTransaction(String pgTransactionId) {
         if (pgTransactionId == null || pgTransactionId.equals(this.pgTransactionId)) {
             return true;

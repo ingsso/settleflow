@@ -1,13 +1,18 @@
 package com.settleflow.support;
 
+import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.BeforeEach;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
-import org.testcontainers.junit.jupiter.Container;
-import org.testcontainers.junit.jupiter.Testcontainers;
+
+import java.util.List;
 
 /**
  * 통합 테스트 공통 인프라 — 실제 Postgres + Redis 컨테이너.
@@ -19,27 +24,61 @@ import org.testcontainers.junit.jupiter.Testcontainers;
  * <p>Postgres 는 {@code @ServiceConnection} 이 datasource 를 자동 배선하고,
  * Redis 는 스타터에 자동 연결 지원이 없어 {@code @DynamicPropertySource} 로 host/port 를 직접 꽂는다.
  *
+ * <p><b>싱글턴 컨테이너 패턴(W2D2).</b> {@code @Container}/{@code @Testcontainers} 를 쓰지 않는다 —
+ * 그 조합은 이 추상 부모의 static 컨테이너를 <b>클래스마다 stop</b> 시킨다. 그런데 Spring 컨텍스트는
+ * 캐시되어 클래스를 넘어 살아남으므로, 뒤에 오는 공유 클래스가 <b>이미 죽은 컨테이너를 가리키는
+ * 캐시 컨텍스트</b>를 물어 커넥션을 0개 얻는다({@code total=0} 타임아웃). 공유 클래스가 3개로 늘자
+ * 실제로 터졌다. 대신 static 블록에서 한 번만 {@code start()} 하고 <b>끄지 않는다</b> —
+ * JVM 종료 시 Testcontainers 의 Ryuk 이 정리한다. 컨테이너가 스위트 전체에서 살아 있어 캐시 컨텍스트가
+ * 항상 유효하다.
+ *
  * <p>사용: {@code class XxxTest extends IntegrationTestSupport { ... }}.
  * 필요한 빈은 {@code @Autowired} 로 꺼내 쓴다 —
  * {@code PaymentService}, {@code PaymentRepository}, {@code OrderRepository},
  * {@code ProductRepository}, {@code StringRedisTemplate}, {@code TransactionTemplate} 등.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-@Testcontainers
 public abstract class IntegrationTestSupport {
 
-    @Container
     @ServiceConnection
     static final PostgreSQLContainer<?> POSTGRES =
             new PostgreSQLContainer<>(TestImages.POSTGRES);
 
-    @Container
     static final GenericContainer<?> REDIS =
             new GenericContainer<>(TestImages.REDIS).withExposedPorts(6379);
+
+    static {
+        // 한 번만 켜고 스위트 내내 유지 — @Container 의 클래스별 stop 을 대체한다.
+        POSTGRES.start();
+        REDIS.start();
+    }
 
     @DynamicPropertySource
     static void redisProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+    }
+
+    @Autowired private EntityManager em;
+    @Autowired private PlatformTransactionManager cleanupTxManager;
+
+    /**
+     * 컨테이너가 스위트 내내 살아 있으므로(싱글턴) 데이터가 클래스·테스트 간에 남는다.
+     * 매 테스트 전에 전 테이블을 비워 격리한다 — 자식의 {@code @BeforeEach}(seeding)보다
+     * 먼저 실행된다(JUnit: 부모 @BeforeEach 우선).
+     *
+     * <p>순서는 FK 를 거스르지 않는다: 자식 행부터 지운다. {@code ledger_entry}(→journal·seller)·
+     * {@code refund}/{@code payment}(→journal) 를 먼저, 그 다음 {@code journal},
+     * {@code product} 뒤 {@code seller}. W2 에서 ledger 테스트가 늘어도 여기 한 곳만 본다.
+     */
+    @BeforeEach
+    void cleanDatabase() {
+        new TransactionTemplate(cleanupTxManager).executeWithoutResult(s -> {
+            List<String> tablesChildFirst = List.of(
+                    "ledger_entry", "refund", "payment", "order_item",
+                    "orders", "journal", "product", "seller");
+            tablesChildFirst.forEach(t ->
+                    em.createNativeQuery("DELETE FROM " + t).executeUpdate());
+        });
     }
 }

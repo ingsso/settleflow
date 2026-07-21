@@ -1,5 +1,7 @@
 package com.settleflow.payment.service;
 
+import com.settleflow.ledger.domain.Journal;
+import com.settleflow.ledger.service.LedgerService;
 import com.settleflow.order.domain.Order;
 import com.settleflow.order.domain.OrderTransitionResult;
 import com.settleflow.payment.domain.Payment;
@@ -33,11 +35,14 @@ public class PaymentTransitionService {
     private static final int MAX_ATTEMPTS = 3;
 
     private final PaymentRepository paymentRepository;
+    private final LedgerService ledgerService;
     private final TransactionTemplate txTemplate;
 
     public PaymentTransitionService(PaymentRepository paymentRepository,
+                                    LedgerService ledgerService,
                                     PlatformTransactionManager txManager) {
         this.paymentRepository = paymentRepository;
+        this.ledgerService = ledgerService;
         this.txTemplate = new TransactionTemplate(txManager);
     }
 
@@ -52,6 +57,11 @@ public class PaymentTransitionService {
         return dispatch(merchantPaymentId, pgTransactionId,
                 Payment::onApproved,
                 payment -> {
+                    // 돈은 들어왔다 — 주문 상태와 무관하게 분개는 남긴다. TRANSITIONED 1회에만 불리므로
+                    // 중복 웹훅이 와도 journal 은 하나(W2D1 §4). tx2 안이라 PAID·journal 이 원자적으로 함께 커밋.
+                    Journal journal = ledgerService.recordPayment(payment);
+                    payment.linkJournal(journal);
+
                     if (payment.getOrder().onPaymentConfirmed() == OrderTransitionResult.CONFLICT) {
                         recordOrderAnomaly(payment);
                     }
