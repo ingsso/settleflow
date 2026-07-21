@@ -238,7 +238,7 @@
 
 - Day 1: 이중장부 설계 → [week2/W2D1_이중장부_설계.md](week2/W2D1_이중장부_설계.md). `journal`+`ledger_entry` 모델 확정(**C 방식** — 원인이 journal 을 FK 로 가리킴, 무결성 우선). 20,000 결제 3줄 분개 본인 도출, **B**(사건 단위 묶음)·**C** 를 근거로 선택, **polymorphic 의 FK 무결성 비용을 지적받고 재선택**(반박을 받아 재고 — 5세션째 패턴이 반대 방향으로 작동). journal 은 PAID 확정 시 생성(PENDING=null), W1D4 backbone 이 이중계상 방어. **잔여(V3 DDL + 엔티티) 완료·실측**: `V3__add_ledger.sql`(journal·ledger_entry + payment/refund 에 journal_id, 전부 nullable+UNIQUE) + 엔티티 5개(`Journal`·`LedgerEntry`·enum 3). 열린 질문 4개 결정(payment/refund.journal_id UNIQUE, 계정 3개로 닫힘, 환불 수수료 미환급 정책, journal.type 유지). compile→부팅→`ddl-auto=validate`(컬럼 매핑)→전체 **19 건 0 실패**. 컬럼 매핑 음성대조군은 Day 2 INSERT 로 위임(미검증 명시).
 - Day 2: 자동 분개(`LedgerService`) + 셀러별 분개 → [week2/W2D2_자동분개_셀러별장부.md](week2/W2D2_자동분개_셀러별장부.md). **셀러 쪼개기 결정**(안 쪼개면 Week 3 대사가 장부 밖을 역산 → 장부가 진실원본이 아니게 됨) → `V4__add_seller_fee_and_ledger_seller.sql`(`ledger_entry.seller_id` nullable FK + `chk_ledger_seller_presence`, `seller.fee_rate` bp INT DEFAULT 500). 조립은 **B2**(서비스가 요율·반올림으로 쪼개 `EntrySpec`, `Journal.forPayment` 가 조립+`assertBalanced`), **수수료만 반올림·미지급금은 빼서 구함**→균형 구조적 성립. 배선은 TRANSITIONED 부수효과(W2D1 §3·§4 멱등 재사용) + `Payment.linkJournal`. **실측**: 단일셀러(journal 1/entries 3/현금 20,000=미지급금 19,000+수수료 1,000·균형)·다중셀러(entries 5=2N+1·균형)·**중복승인 20→journal 1**(이중계상 방어 물증). 음성대조군 2건: `assertBalanced` 불균형→예외(영구 테스트), 멱등 가드 제거→journal ~21(본인 직접 red-light 확인·원복). CHECK 제약 양방향 거부+통과(`LedgerSellerConstraintTest`). 테스트 인프라 회귀 잡음(싱글턴 컨테이너+정리 중앙화). CONFLICT(취소된 주문+늦은 승인)도 분개는 남김(돈은 들어옴). 전체 **27 건 0 실패**. *(5문항 자기평가 미작성)*
-- Day 3: 
+- Day 3: `Σ차변==Σ대변` 불변식을 DB 제약으로 → [week2/W2D3_불변식_DB제약.md](week2/W2D3_불변식_DB제약.md). **CHECK 로는 불가**(자기 행만 봄, W1D1 §1) → **지연 제약 트리거**(`CONSTRAINT TRIGGER DEFERRABLE INITIALLY DEFERRED`, `V5__`). 검사를 커밋 시점으로 미뤄 3줄이 다 모인 뒤 판정(즉시 트리거면 현금 첫 줄에서 오판). 판정식(INSERT-only, 차변+·대변−·합0)은 본인 도출. **실측**(`LedgerBalanceConstraintTest`, autoCommit=false 로 커밋 경계 직접 제어): 균형→커밋 / 불균형→**커밋에서** 거부(INSERT 는 통과) / 트랜잭션 중간 불균형은 허용. **V5 가 W2D2 테스트를 잡음** — `올바른_조합` fixture 가 불균형(20,000 vs 19,000)이었음(앱 가드는 통과·DB 가드가 잡음, 이중방어의 산 증거) → 균형 3줄+한 tx 로 수정. 음성대조군: 트리거 DROP→불균형 커밋됨(빨간불) 확인·원복. 전체 **30건 0실패**. *(5문항 자기평가 미작성)*
 - Day 4: 
 - Day 5: 
 
@@ -304,6 +304,21 @@
 - [ ] **반박 모멘텀** — W2D1 에 켰다가 오늘 0. 다음엔 내 제안 한 곳은 근거를 되물을 것.
 - [ ] **red-light 원복까지가 한 세트** — 빨간불 확인했으면 원복하고 그 사실을 말하기.
 - [ ] **AI 활용 로그(#4)를 그날 채울 것** — 오늘도 비어 나중 복원 불가. W2D1 갚을 숙제 재이월.
+
+### [Week 2 / Day 3] 오늘 한 일
+
+1. 설계 먼저 혼자 해봄: **없음**
+
+2. 코드 받고 내 말로 재설명 시도: **해당 없음**
+
+3. AI 없이 혼자 푼 것:
+   -
+
+4. AI 활용 로그 3줄:
+
+5. 선택지+트레이드오프로 물어봄: **없음**
+
+**교차검증(Claude)**:
 
 ---
 

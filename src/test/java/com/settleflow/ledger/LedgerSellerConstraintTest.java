@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -24,6 +26,9 @@ class LedgerSellerConstraintTest extends IntegrationTestSupport {
 
     @Autowired
     JdbcTemplate jdbc;
+
+    @Autowired
+    PlatformTransactionManager txManager;
 
     private Long journalId;
     private Long sellerId;
@@ -77,18 +82,21 @@ class LedgerSellerConstraintTest extends IntegrationTestSupport {
     // ── 통과: 올바른 조합은 들어가야 한다 ──
     @Test
     void 올바른_조합은_통과한다() {
-        // FILL ④: CASH(셀러 null) + SELLER_PAYABLE(셀러 있음) 을 각각 넣고, 실제로 2건이 들어갔는지 센다.
-        //   힌트: jdbc.queryForObject("SELECT count(*) FROM ledger_entry WHERE journal_id = ?", Long.class, journalId)
-        //
         //   이 케이스가 없으면 안 되는 이유:
         //   CHECK 를 잘못 써서 '무조건 거부'가 돼 있어도 위 두 테스트는 통과한다.
-        //   거부 테스트만 있으면 "막는다"는 알아도 "지나가야 할 게 지나가나"는 모른다.
-        //   음성대조군의 거울상이다.
-        insertEntry("CASH", "DEBIT", 20_000L, null);
-        insertEntry("SELLER_PAYABLE", "CREDIT", 19_000L, sellerId);
+        //   거부 테스트만 있으면 "막는다"는 알아도 "지나가야 할 게 지나가나"는 모른다. 음성대조군의 거울상.
+        //
+        //   V5 부터: "정상 삽입"은 presence 뿐 아니라 균형(Σ차변==Σ대변)도 만족해야 한다.
+        //   그래서 (1) 균형 잡힌 3줄을 넣고, (2) 지연 검사가 커밋에 몰아 돌도록 한 트랜잭션으로 묶는다
+        //   (autocommit 이면 CASH 한 줄만 커밋되는 순간 불균형으로 거부됨).
+        new TransactionTemplate(txManager).executeWithoutResult(s -> {
+            insertEntry("CASH", "DEBIT", 20_000L, null);
+            insertEntry("SELLER_PAYABLE", "CREDIT", 19_000L, sellerId);
+            insertEntry("FEE_REVENUE", "CREDIT", 1_000L, sellerId);
+        });
 
         Long rows = jdbc.queryForObject("SELECT count(*) FROM ledger_entry WHERE journal_id = ?", Long.class, journalId);
 
-        assertThat(rows).isEqualTo(2);
+        assertThat(rows).isEqualTo(3);
     }
 }
