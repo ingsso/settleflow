@@ -127,7 +127,11 @@ curl -X POST http://localhost:8080/orders \
   - 스키마(Flyway 6테이블), 엔티티, 재고 원자적 차감
   - Mock PG + 웹훅 수신 + SETNX 멱등 + 낙관적 락 backbone
   - `OrderService` 배선 + `POST /orders` + 로컬 e2e 관통 확인
-- [ ] Week 2 — 이중장부(Ledger) + 부분환불 상태머신
+- [ ] **Week 2 — 이중장부(Ledger) + 부분환불** *(D1~D4 완료, D5 진행 예정)*
+  - `journal`+`ledger_entry` 모델(append-only) + 셀러별 자동 분개
+  - `Σ차변==Σ대변` 을 앱 가드 + **지연 제약 트리거**로 이중 방어
+  - 환불 요청 가드 + `refunded_amount` 파생 라벨(저장하지 않음)
+  - 남은 것: 부분환불 **역분개**(reversing entry)
 - [ ] Week 3 — 정산 배치 + 대사(Reconciliation)
 - [ ] Week 4 — 관측성 + 부하테스트(k6)
 - [ ] Week 5 — 정기결제 재시도(Dunning)
@@ -150,6 +154,32 @@ curl -X POST http://localhost:8080/orders \
 
 ---
 
+## STAR — 이중장부 불변식
+
+**S(상황)**: 셀러 여럿이 입점한 이커머스에서 20,000원 결제 1건은 장부에서 **현금 20,000 차변 / 셀러 미지급금 19,000 + 수수료 1,000 대변**으로 쪼개진다. 이 장부가 정산의 진실원본이라, 한 줄이라도 어긋나면 셀러에게 줄 돈이 틀리고 Week 3 대사가 비교할 **기준 자체**가 무너진다.
+
+**T(과제)**: `Σ차변 == Σ대변` 불변식을 **어떤 경로로도** 못 깨게 한다. 서비스 코드뿐 아니라 생 SQL·배치·미래의 다른 서비스가 `ledger_entry` 에 직접 INSERT 해도 지켜져야 한다.
+
+**A(행동)**: 가드를 **두 층**에 뒀는데, 둘은 중복이 아니라 서로 다른 걸 잡는다.
+
+1. **모델** — `journal`(사건) + `ledger_entry`(줄). 원인(payment/refund)이 `journal_id` 를 FK 로 가리키고, 장부는 **append-only**(지우개가 아니라 빨간 펜).
+2. **앱 가드** — 서비스가 요율·반올림으로 쪼개고 `Journal.forPayment` 가 조립하며 `assertBalanced()`. **수수료만 반올림하고 미지급금은 빼서 구해** 두 줄의 합이 정의상 subtotal — 균형이 *구조적으로* 성립한다.
+3. **DB 가드** — `CHECK` 로는 불가능하다. CHECK 는 자기 행 하나만 보는데 이 불변식은 **여러 줄을 합쳐야** 나온다. 즉시 트리거도 안 된다 — 3줄이 각각 INSERT 되므로 첫 줄(현금 20,000만)에서 대변 0 으로 **오판**한다. → `CONSTRAINT TRIGGER ... DEFERRABLE INITIALLY DEFERRED` 로 검사를 **커밋 시점**까지 미룬다.
+4. **배선** — 분개는 승인 전이가 실제로 일어난 `TRANSITIONED` **1회에만** 실행(Week 1 의 멱등 backbone 재사용) → 중복 웹훅이 와도 이중계상이 없다.
+
+**R(결과)** — 전부 실행 결과:
+
+- 단일 셀러 결제 → `journal=1, entries=3`, 현금 **20,000** = 미지급금 **19,000** + 수수료 **1,000**, 차변==대변
+- 다중 셀러(N=2) → `entries=5`(2N+1), 균형 유지
+- **중복 승인 20회 → journal 1개** (이중계상 방어)
+- 불균형 journal → INSERT 는 통과하고 **커밋에서 거부**. 실패 지점이 INSERT 가 아니라 커밋이라는 게 지연 트리거가 실제로 지연됐다는 증거
+- **음성대조군 3건**: `assertBalanced` 에 불균형 입력 → 예외(영구 테스트로 고정) / 트리거 `DROP` → 불균형이 **그냥 커밋됨**(빨간불) / 멱등 가드 제거 → journal 이 **~21개**로 폭증
+- **예상 못한 소득 — 두 가드가 서로 다른 걸 잡는다는 산 증거**: DB 제약을 넣자 기존 테스트의 *"올바른 조합"* fixture 가 깨졌다. 그 fixture 가 사실 **불균형**(20,000 vs 19,000)이었고 — **앱 가드는 통과시켰는데 DB 가드가 잡았다.** 이중방어가 관념이 아님이 사고로 증명된 자리.
+
+*(W2D1~D3 실측. 현재 스위트 40건 0실패. 부분환불 역분개는 W2D5 — 이 불변식이 환불 방향으로도 성립하는지는 그때 추가된다.)*
+
+---
+
 ## 문서
 
 설계 근거·실측 로그는 [`docs/`](docs/)에 주별 폴더로 기록. 주 무관 인덱스(5주 계획·체크리스트·기술결정)는 `docs/` 루트, daily 로그는 `docs/weekN/`:
@@ -157,3 +187,7 @@ curl -X POST http://localhost:8080/orders \
 - [`week1/W1D3_스키마_확정.md`](docs/week1/W1D3_스키마_확정.md) — 스키마·엔티티, Redis 락 폐기 근거
 - [`week1/W1D4_웹훅_멱등.md`](docs/week1/W1D4_웹훅_멱등.md) — SETNX/backbone 두 겹
 - [`week1/W1D5_배선.md`](docs/week1/W1D5_배선.md) — 전체 배선, 트랜잭션 경계
+- [`week2/W2D1_이중장부_설계.md`](docs/week2/W2D1_이중장부_설계.md) — journal+ledger_entry 모델, append-only
+- [`week2/W2D2_자동분개_셀러별장부.md`](docs/week2/W2D2_자동분개_셀러별장부.md) — 셀러별 분개, 반올림으로 균형을 구조화
+- [`week2/W2D3_불변식_DB제약.md`](docs/week2/W2D3_불변식_DB제약.md) — CHECK 로 안 되는 이유, 지연 제약 트리거
+- [`week2/W2D4_환불_가드_파생라벨.md`](docs/week2/W2D4_환불_가드_파생라벨.md) — 파생 vs 저장, 가드 분업, affected rows 를 판정으로
