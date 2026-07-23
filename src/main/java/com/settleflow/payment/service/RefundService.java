@@ -1,5 +1,7 @@
 package com.settleflow.payment.service;
 
+import com.settleflow.ledger.domain.Journal;
+import com.settleflow.ledger.service.LedgerService;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.PaymentStatus;
 import com.settleflow.payment.domain.Refund;
@@ -13,8 +15,8 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 환불 요청 판정(W2D4). 요청을 받아줄지 결정하고, 받아주면 금액 누적 + {@code refund} 행을 남긴다.
  *
- * <p><b>오늘은 장부를 건드리지 않는다.</b> 역분개(reversing entry)는 W2D5 — 여기서 만든
- * {@code Refund} 의 {@code journal} 은 아직 null 이다(V3 에서 nullable).
+ * <p><b>W2D5 부터 장부까지 같은 트랜잭션에서</b> 움직인다: 금액 누적(UPDATE) + {@code refund} 행
+ * INSERT + 역분개 journal INSERT 가 한 덩어리다. 갈라지면 돈·이력·장부가 드리프트한다.
  *
  * <h3>가드 분업</h3>
  * <pre>
@@ -40,13 +42,16 @@ public class RefundService {
 
     private final PaymentRepository paymentRepository;
     private final RefundRepository refundRepository;
+    private final LedgerService ledgerService;
     private final EntityManager em;
 
     public RefundService(PaymentRepository paymentRepository,
                          RefundRepository refundRepository,
+                         LedgerService ledgerService,
                          EntityManager em) {
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
+        this.ledgerService = ledgerService;
         this.em = em;
     }
 
@@ -81,7 +86,12 @@ public class RefundService {
 
         // 네이티브 UPDATE 는 영속성 컨텍스트를 모른다 — 새로고침해야 refundStatus() 가 최신을 본다.
         em.refresh(payment);
-        refundRepository.save(new Refund(payment, amount));
+
+        // 역분개(W2D5). 위 UPDATE 가 1행을 갱신했다는 건 "이 환불이 실제로 일어났다"는 판정이고,
+        // 그 직후가 journal 이 붙을 자리다. 결제처럼 멱등 지점에 얹지 않는 이유는 환불엔 멱등이
+        // 없기 때문 — 같은 금액 두 번은 진짜 환불 2건이라 journal 도 2개가 정답이다(위 javadoc).
+        Journal journal = ledgerService.recordRefund(payment, amount);
+        refundRepository.save(new Refund(payment, amount, journal));
         return RefundResult.ACCEPTED;
     }
 }

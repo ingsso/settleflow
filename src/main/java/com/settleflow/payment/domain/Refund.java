@@ -42,9 +42,17 @@ public class Refund {
     protected Refund() {   // JPA 전용
     }
 
-    public Refund(Payment payment, Long amount) {
+    /**
+     * journal 을 세터가 아니라 <b>생성자로</b> 받는다(W2D5). append-only 는 "고치지 않는다"는 규율인데
+     * 세터를 열면 고칠 수 있는 문이 생겨 위 주석과 {@code updated_at} 부재가 거짓말이 된다.
+     *
+     * <p>그래서 순서가 강제된다: <b>journal 조립·저장 → Refund 생성 → save</b>.
+     * 세터였다면 자유로웠을 순서를 생성자가 고정한다.
+     */
+    public Refund(Payment payment, Long amount, Journal journal) {
         this.payment = payment;
         this.amount = amount;
+        this.journal = journal;
     }
 
     @PrePersist

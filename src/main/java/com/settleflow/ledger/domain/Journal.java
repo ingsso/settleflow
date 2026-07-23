@@ -44,7 +44,24 @@ public class Journal {
      * 사용자 입력 오류가 아니다 → {@link IllegalStateException}.
      */
     public static Journal forPayment(List<EntrySpec> specs) {
-        Journal journal = new Journal(JournalType.PAYMENT);
+        return assemble(JournalType.PAYMENT, specs);
+    }
+
+    /**
+     * 환불 역분개 조립(W2D5). {@code SELLER_PAYABLE} 차변(갚을 빚 감소) N 줄 + {@code CASH} 대변 1 줄.
+     * {@code FEE_REVENUE} 는 건드리지 않는다 — 환불 시 수수료는 환급하지 않는다(W2D1 정책).
+     *
+     * <p>여기서도 {@link #assertBalanced} 는 <b>균형을 지키는 장치가 아니다.</b> 서비스가 마지막
+     * 셀러 몫을 계산하지 않고 <i>뺄셈으로</i> 구하므로(=Σ배분액이 정의상 환불액) 균형은 반올림
+     * 방식과 무관하게 성립한다. 이 검사가 걸린다면 그건 조립을 틀린 것 = 프로그래밍 오류다.
+     * {@link #forPayment} 와 같은 지위.
+     */
+    public static Journal forRefund(List<EntrySpec> specs) {
+        return assemble(JournalType.REFUND, specs);
+    }
+
+    private static Journal assemble(JournalType type, List<EntrySpec> specs) {
+        Journal journal = new Journal(type);
         for (EntrySpec spec : specs) {
             journal.entries.add(new LedgerEntry(
                     journal, spec.account(), spec.side(), spec.amount(), spec.sellerId()));
