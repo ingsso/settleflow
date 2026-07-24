@@ -74,16 +74,20 @@ class RefundConcurrencyTest extends IntegrationTestSupport {
 
         long refunded = refundedAmount(paymentId);
         long rows = refundRows();
+        long refundJournals = refundJournalCount();
         RefundStatus label = refundStatusOf(paymentId);
 
         System.out.printf("[실측] 동시환불 %d스레드×%,d원 (한도 20,000) → ACCEPTED=%d EXCEEDS=%d "
-                        + "| refunded=%,d refund행=%d 라벨=%s%n",
-                threads, refundAmt, accepted, exceeded, refunded, rows, label);
+                        + "| refunded=%,d refund행=%d REFUND journal=%d 라벨=%s%n",
+                threads, refundAmt, accepted, exceeded, refunded, rows, refundJournals, label);
 
         assertThat(accepted).isEqualTo(4);              // 20,000 / 5,000
         assertThat(exceeded).isEqualTo(6);
         assertThat(refunded).isEqualTo(20_000L);        // 25,000 이면 lost update — 실패
         assertThat(rows).isEqualTo(4);                  // 통과한 만큼만 이력이 남는다
+        // W2D5 §7 이월 닫음: 환불엔 멱등이 없어 ACCEPTED 4건이면 역분개도 4개가 정답이다.
+        // refund행 4개는 봤지만 journal 이 4개인지는 안 봤었다 — 하나라도 새면 장부와 이력이 드리프트.
+        assertThat(refundJournals).isEqualTo(accepted);
         assertThat(label).isEqualTo(RefundStatus.REFUNDED);
     }
 
@@ -120,6 +124,11 @@ class RefundConcurrencyTest extends IntegrationTestSupport {
 
     long refundRows() {
         return ((Number) em.createNativeQuery("SELECT count(*) FROM refund")
+                .getSingleResult()).longValue();
+    }
+
+    long refundJournalCount() {
+        return ((Number) em.createNativeQuery("SELECT count(*) FROM journal WHERE type = 'REFUND'")
                 .getSingleResult()).longValue();
     }
 }
