@@ -4,6 +4,7 @@ import com.settleflow.order.domain.Order;
 import com.settleflow.order.service.OrderService;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.PaymentStatus;
+import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.domain.RefundStatus;
 import com.settleflow.payment.repository.PaymentRepository;
@@ -58,12 +59,12 @@ class RefundGuardTest extends IntegrationTestSupport {
         Fixture f = paidOrder();
         Long pendingId = extraPayment(f.orderId(), 20_000L, PaymentStatus.PENDING);
 
-        RefundResult result = refundService.requestRefund(pendingId, 5_000L);
+        RefundOutcome result = refundService.requestRefund(pendingId, 5_000L);
 
         System.out.printf("[실측] PENDING 환불요청 → %s | refunded=%d refund행=%d%n",
                 result, refundedAmount(pendingId), refundRows());
 
-        assertThat(result).isEqualTo(RefundResult.NOT_REFUNDABLE);
+        assertThat(result).isEqualTo(new RefundOutcome.Rejected(RefundResult.NOT_REFUNDABLE));
         assertThat(refundedAmount(pendingId)).isZero();
         assertThat(refundRows()).isZero();
     }
@@ -73,12 +74,12 @@ class RefundGuardTest extends IntegrationTestSupport {
         Fixture f = paidOrder();
         Long failedId = extraPayment(f.orderId(), 20_000L, PaymentStatus.FAILED);
 
-        RefundResult result = refundService.requestRefund(failedId, 5_000L);
+        RefundOutcome result = refundService.requestRefund(failedId, 5_000L);
 
         System.out.printf("[실측] FAILED 환불요청 → %s | refunded=%d refund행=%d%n",
                 result, refundedAmount(failedId), refundRows());
 
-        assertThat(result).isEqualTo(RefundResult.NOT_REFUNDABLE);
+        assertThat(result).isEqualTo(new RefundOutcome.Rejected(RefundResult.NOT_REFUNDABLE));
         assertThat(refundRows()).isZero();
     }
 
@@ -87,14 +88,14 @@ class RefundGuardTest extends IntegrationTestSupport {
         Fixture f = paidOrder();
         Long unknownId = extraPayment(f.orderId(), 20_000L, PaymentStatus.UNKNOWN);
 
-        RefundResult result = refundService.requestRefund(unknownId, 5_000L);
+        RefundOutcome result = refundService.requestRefund(unknownId, 5_000L);
 
         System.out.printf("[실측] UNKNOWN 환불요청 → %s (FAILED 와 다른 값이어야 함) | refund행=%d%n",
                 result, refundRows());
 
         // 실패가 아니라 정보의 부재(W1D1 §3) — 조회 후 재시도 여지가 있어 사유를 나눈다
-        assertThat(result).isEqualTo(RefundResult.PAYMENT_UNKNOWN);
-        assertThat(result).isNotEqualTo(RefundResult.NOT_REFUNDABLE);
+        assertThat(result).isEqualTo(new RefundOutcome.Rejected(RefundResult.PAYMENT_UNKNOWN));
+        assertThat(result).isNotEqualTo(new RefundOutcome.Rejected(RefundResult.NOT_REFUNDABLE));
         assertThat(refundRows()).isZero();
     }
 
@@ -104,14 +105,14 @@ class RefundGuardTest extends IntegrationTestSupport {
     void 영원_이하_환불은_거부된다() {
         Fixture f = paidOrder();
 
-        RefundResult zero = refundService.requestRefund(f.paymentId(), 0L);
-        RefundResult negative = refundService.requestRefund(f.paymentId(), -5_000L);
+        RefundOutcome zero = refundService.requestRefund(f.paymentId(), 0L);
+        RefundOutcome negative = refundService.requestRefund(f.paymentId(), -5_000L);
 
         System.out.printf("[실측] 0원 → %s / 음수 → %s | refunded=%d refund행=%d%n",
                 zero, negative, refundedAmount(f.paymentId()), refundRows());
 
-        assertThat(zero).isEqualTo(RefundResult.INVALID_AMOUNT);
-        assertThat(negative).isEqualTo(RefundResult.INVALID_AMOUNT);
+        assertThat(zero).isEqualTo(new RefundOutcome.Rejected(RefundResult.INVALID_AMOUNT));
+        assertThat(negative).isEqualTo(new RefundOutcome.Rejected(RefundResult.INVALID_AMOUNT));
         assertThat(refundedAmount(f.paymentId())).isZero();
         assertThat(refundRows()).isZero();
     }
@@ -120,14 +121,14 @@ class RefundGuardTest extends IntegrationTestSupport {
     void 잔액을_넘는_환불은_거부되고_금액도_안_늘어난다() {
         Fixture f = paidOrder();   // 20,000
 
-        RefundResult first = refundService.requestRefund(f.paymentId(), 15_000L);
-        RefundResult over = refundService.requestRefund(f.paymentId(), 6_000L);   // 잔액 5,000
+        RefundOutcome first = refundService.requestRefund(f.paymentId(), 15_000L);
+        RefundOutcome over = refundService.requestRefund(f.paymentId(), 6_000L);   // 잔액 5,000
 
         System.out.printf("[실측] 15,000 → %s / 잔액5,000 에 6,000 → %s | refunded=%d refund행=%d%n",
                 first, over, refundedAmount(f.paymentId()), refundRows());
 
-        assertThat(first).isEqualTo(RefundResult.ACCEPTED);
-        assertThat(over).isEqualTo(RefundResult.EXCEEDS_REMAINING);
+        assertThat(first).isInstanceOf(RefundOutcome.Accepted.class);
+        assertThat(over).isEqualTo(new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING));
         assertThat(refundedAmount(f.paymentId())).isEqualTo(15_000L);   // 거부는 부작용 0
         assertThat(refundRows()).isEqualTo(1);
     }
@@ -136,16 +137,16 @@ class RefundGuardTest extends IntegrationTestSupport {
     void 전액환불된_결제의_추가환불은_별도_가드_없이_잔액조건에_막힌다() {
         Fixture f = paidOrder();   // 20,000
 
-        RefundResult full = refundService.requestRefund(f.paymentId(), 20_000L);
-        RefundResult more = refundService.requestRefund(f.paymentId(), 1L);
+        RefundOutcome full = refundService.requestRefund(f.paymentId(), 20_000L);
+        RefundOutcome more = refundService.requestRefund(f.paymentId(), 1L);
 
         System.out.printf("[실측] 전액환불 → %s / 그 뒤 1원 → %s | 라벨=%s%n",
                 full, more, refundStatusOf(f.paymentId()));
 
-        assertThat(full).isEqualTo(RefundResult.ACCEPTED);
+        assertThat(full).isInstanceOf(RefundOutcome.Accepted.class);
         // "REFUNDED 에서 추가환불 금지"를 위한 상태 가드가 따로 없다 —
         // refunded_amount == amount 면 (+x <= amount) 가 어떤 양수 x 에도 거짓이라 자동으로 막힌다.
-        assertThat(more).isEqualTo(RefundResult.EXCEEDS_REMAINING);
+        assertThat(more).isEqualTo(new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING));
         assertThat(refundedAmount(f.paymentId())).isEqualTo(20_000L);
         assertThat(refundRows()).isEqualTo(1);
     }
@@ -180,15 +181,15 @@ class RefundGuardTest extends IntegrationTestSupport {
     void 같은_금액_환불_두번은_중복이_아니라_환불_2건이다() {
         Fixture f = paidOrder();   // 20,000
 
-        RefundResult first = refundService.requestRefund(f.paymentId(), 5_000L);
-        RefundResult second = refundService.requestRefund(f.paymentId(), 5_000L);
+        RefundOutcome first = refundService.requestRefund(f.paymentId(), 5_000L);
+        RefundOutcome second = refundService.requestRefund(f.paymentId(), 5_000L);
 
         System.out.printf("[실측] 5,000 두 번 → %s, %s | refunded=%d refund행=%d%n",
                 first, second, refundedAmount(f.paymentId()), refundRows());
 
         // 결제 승인이었다면 IGNORED 였을 자리 — 환불엔 그 대칭이 없다(RefundResult javadoc)
-        assertThat(first).isEqualTo(RefundResult.ACCEPTED);
-        assertThat(second).isEqualTo(RefundResult.ACCEPTED);
+        assertThat(first).isInstanceOf(RefundOutcome.Accepted.class);
+        assertThat(second).isInstanceOf(RefundOutcome.Accepted.class);
         assertThat(refundedAmount(f.paymentId())).isEqualTo(10_000L);
         assertThat(refundRows()).isEqualTo(2);
     }

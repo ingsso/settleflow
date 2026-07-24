@@ -5,6 +5,7 @@ import com.settleflow.ledger.service.LedgerService;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.PaymentStatus;
 import com.settleflow.payment.domain.Refund;
+import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.payment.repository.RefundRepository;
@@ -61,27 +62,29 @@ public class RefundService {
      * <p>금액 누적(UPDATE)과 {@code refund} 행 INSERT 가 <b>한 트랜잭션</b>이다 — 갈라지면
      * {@code payment.refunded_amount} 와 환불 이력이 드리프트한다({@link Refund} 클래스 주석).
      *
-     * @return {@link RefundResult#ACCEPTED} 또는 거부 사유. 예상되는 입력이므로 예외를 던지지 않는다.
+     * @return 성공이면 저장된 {@link Refund} 를 딴 {@link RefundOutcome.Accepted}, 아니면 거부 사유를 담은
+     *         {@link RefundOutcome.Rejected}. 예상되는 입력이므로 예외를 던지지 않는다(존재하지 않는
+     *         결제 id 만 {@link IllegalArgumentException} — 그건 프로그래밍/경로 오류지 환불 판정이 아니다).
      */
     @Transactional
-    public RefundResult requestRefund(Long paymentId, long amount) {
+    public RefundOutcome requestRefund(Long paymentId, long amount) {
         Payment payment = paymentRepository.findById(paymentId)
                 .orElseThrow(() -> new IllegalArgumentException("no payment for id=" + paymentId));
 
         // --- 앱 가드: 이 결제가 환불 사건을 받을 자격이 있나 ---
         if (payment.getStatus() == PaymentStatus.UNKNOWN) {
-            return RefundResult.PAYMENT_UNKNOWN;   // 조회하면 될 수도 있다 — 아래와 구분
+            return new RefundOutcome.Rejected(RefundResult.PAYMENT_UNKNOWN);  // 조회하면 될 수도 있다 — 아래와 구분
         }
         if (payment.getStatus() != PaymentStatus.PAID) {
-            return RefundResult.NOT_REFUNDABLE;    // PENDING·FAILED — 재시도해도 안 바뀐다
+            return new RefundOutcome.Rejected(RefundResult.NOT_REFUNDABLE);   // PENDING·FAILED — 재시도해도 안 바뀐다
         }
         if (amount <= 0) {
-            return RefundResult.INVALID_AMOUNT;
+            return new RefundOutcome.Rejected(RefundResult.INVALID_AMOUNT);
         }
 
         // --- SQL 가드: 판정과 실행이 한 문장. 영향 행 수가 곧 판정이다 ---
         if (paymentRepository.addRefundedAmount(paymentId, amount) == 0) {
-            return RefundResult.EXCEEDS_REMAINING;
+            return new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING);
         }
 
         // 네이티브 UPDATE 는 영속성 컨텍스트를 모른다 — 새로고침해야 refundStatus() 가 최신을 본다.
@@ -91,7 +94,7 @@ public class RefundService {
         // 그 직후가 journal 이 붙을 자리다. 결제처럼 멱등 지점에 얹지 않는 이유는 환불엔 멱등이
         // 없기 때문 — 같은 금액 두 번은 진짜 환불 2건이라 journal 도 2개가 정답이다(위 javadoc).
         Journal journal = ledgerService.recordRefund(payment, amount);
-        refundRepository.save(new Refund(payment, amount, journal));
-        return RefundResult.ACCEPTED;
+        Refund refund = refundRepository.save(new Refund(payment, amount, journal));
+        return new RefundOutcome.Accepted(refund);
     }
 }

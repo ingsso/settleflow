@@ -1,6 +1,7 @@
 package com.settleflow.ledger;
 
 import com.settleflow.order.service.OrderService;
+import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.payment.service.RefundService;
@@ -50,7 +51,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long productId = createProduct("셀러A", 500, 10_000L, 5);
         Long paymentId = paidOrder(Map.of(productId, 2));            // 20,000
 
-        RefundResult result = refundService.requestRefund(paymentId, 5_000L);
+        RefundOutcome result = refundService.requestRefund(paymentId, 5_000L);
 
         long refundJournals = count("SELECT count(*) FROM journal WHERE type = 'REFUND'");
         long lines = count(refundEntries("count(*)"));
@@ -63,7 +64,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         System.out.printf("[실측] 5,000 부분환불 → REFUND journal=%d 줄=%d | 현금대변=%d 미지급금차변=%d 수수료줄=%d%n",
                 refundJournals, lines, cash, payable, feeRows);
 
-        assertThat(result).isEqualTo(RefundResult.ACCEPTED);
+        assertThat(result).isInstanceOf(RefundOutcome.Accepted.class);
         assertThat(refundJournals).isEqualTo(1);
         assertThat(lines).isEqualTo(2);
         assertThat(cash).isEqualTo(5_000L);
@@ -194,7 +195,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long productId = createProduct("셀러A", 500, 10_000L, 5);
         Long paymentId = paidOrder(Map.of(productId, 2));            // 20,000
 
-        RefundResult over = refundService.requestRefund(paymentId, 20_001L);
+        RefundOutcome over = refundService.requestRefund(paymentId, 20_001L);
 
         long refundJournals = count("SELECT count(*) FROM journal WHERE type = 'REFUND'");
         long refunds = count("SELECT count(*) FROM refund");
@@ -202,7 +203,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         System.out.printf("[실측] 잔액초과 환불 → %s | REFUND journal=%d refund행=%d%n",
                 over, refundJournals, refunds);
 
-        assertThat(over).isEqualTo(RefundResult.EXCEEDS_REMAINING);
+        assertThat(over).isEqualTo(new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING));
         assertThat(refundJournals).isZero();   // 판정이 UPDATE 한 문장이라 그 앞에서 끊긴다
         assertThat(refunds).isZero();
     }

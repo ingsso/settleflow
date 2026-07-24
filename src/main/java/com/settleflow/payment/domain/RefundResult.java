@@ -1,7 +1,12 @@
 package com.settleflow.payment.domain;
 
 /**
- * 환불 <b>요청</b>의 판정 결과(W2D4). {@link TransitionResult} 를 재사용하지 않는다 — 두 가지가 다르다.
+ * 환불 <b>요청</b>의 거부 사유(W2D4, W2 점검에서 축소). {@link TransitionResult} 를 재사용하지 않는다 —
+ * 두 가지가 다르다.
+ *
+ * <p><b>성공은 여기 없다.</b> ACCEPTED 는 {@link RefundOutcome.Accepted} 타입이 대신한다 — 성공은
+ * 생성물({@link Refund})을 딸고 오는데 enum 값은 그걸 담을 수 없어서다. 이 enum 은 이제 <b>거부 4갈래만</b>
+ * 이고, 그래서 {@link RefundOutcome.Rejected} 에 성공을 넣는 게 타입상 불가능하다.
  *
  * <p><b>1. IGNORED 가 없다.</b> 결제 승인은 같은 사건이 또 오면 중복이라 {@code IGNORED} 가 정답이었다
  * (W1D4 멱등). 환불은 아니다 — 5,000원 환불 요청이 두 번 오면 그건 중복이 아니라 <b>진짜 환불 2건</b>일
@@ -9,7 +14,7 @@ package com.settleflow.payment.domain;
  *
  * <p><b>2. 거부 사유가 여러 갈래다.</b> 호출부가 사유별로 다르게 움직여야 한다 — 특히
  * {@link #NOT_REFUNDABLE}(영영 안 됨)과 {@link #PAYMENT_UNKNOWN}(조회 후 될 수도 있음)은
- * 재시도 가능성이 정반대다.
+ * 재시도 가능성이 정반대다. 컨트롤러가 이 둘을 각각 409·503 으로 가르는 근거다.
  *
  * <p><b>왜 예외가 아니라 반환값인가.</b> PENDING 결제로 환불 요청이 오는 건 버그가 아니라
  * <b>정상적으로 예상되는 외부 입력</b>이다. 예상되는 입력을 예외로 처리하지 않는다 —
@@ -17,9 +22,6 @@ package com.settleflow.payment.domain;
  * (반면 {@link Payment#refundStatus()} 는 <i>조회</i>라 정의역 밖 호출이 곧 프로그래밍 오류 → 예외.)
  */
 public enum RefundResult {
-
-    /** 환불 반영됨. {@code refunded_amount} 누적 + {@code refund} 행 1건 생성. */
-    ACCEPTED,
 
     /**
      * 환불 자격 없음 — {@code PENDING}(아직 돈을 안 받음) 또는 {@code FAILED}(받은 적이 없음).

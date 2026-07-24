@@ -1,6 +1,7 @@
 package com.settleflow.payment;
 
 import com.settleflow.order.service.OrderService;
+import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.domain.RefundStatus;
 import com.settleflow.payment.repository.PaymentRepository;
@@ -54,18 +55,20 @@ class RefundConcurrencyTest extends IntegrationTestSupport {
         CyclicBarrier gate = new CyclicBarrier(threads);
         ExecutorService pool = Executors.newFixedThreadPool(threads);
 
-        Callable<RefundResult> attempt = () -> {
+        Callable<RefundOutcome> attempt = () -> {
             gate.await();                      // 전원 모이면 동시 발사
             return refundService.requestRefund(paymentId, refundAmt);
         };
 
-        List<Future<RefundResult>> futures =
+        List<Future<RefundOutcome>> futures =
                 pool.invokeAll(java.util.Collections.nCopies(threads, attempt));
 
+        RefundOutcome.Rejected exceedsRemaining = new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING);
         int accepted = 0, exceeded = 0;
-        for (Future<RefundResult> f : futures) {
-            if (f.get() == RefundResult.ACCEPTED) accepted++;
-            else if (f.get() == RefundResult.EXCEEDS_REMAINING) exceeded++;
+        for (Future<RefundOutcome> f : futures) {
+            RefundOutcome outcome = f.get();
+            if (outcome instanceof RefundOutcome.Accepted) accepted++;
+            else if (outcome.equals(exceedsRemaining)) exceeded++;
         }
         pool.shutdown();
 
