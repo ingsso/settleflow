@@ -2,11 +2,14 @@ package com.settleflow.payment.service;
 
 import com.settleflow.ledger.domain.Journal;
 import com.settleflow.ledger.service.LedgerService;
+import com.settleflow.outbox.domain.EventType;
+import com.settleflow.outbox.service.OutboxWriter;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.PaymentStatus;
 import com.settleflow.payment.domain.Refund;
 import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
+import com.settleflow.payment.event.RefundRequestedEvent;
 import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.payment.repository.RefundRepository;
 import jakarta.persistence.EntityManager;
@@ -44,15 +47,18 @@ public class RefundService {
     private final PaymentRepository paymentRepository;
     private final RefundRepository refundRepository;
     private final LedgerService ledgerService;
+    private final OutboxWriter outboxWriter;
     private final EntityManager em;
 
     public RefundService(PaymentRepository paymentRepository,
                          RefundRepository refundRepository,
                          LedgerService ledgerService,
+                         OutboxWriter outboxWriter,
                          EntityManager em) {
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
         this.ledgerService = ledgerService;
+        this.outboxWriter = outboxWriter;
         this.em = em;
     }
 
@@ -95,6 +101,11 @@ public class RefundService {
         // 없기 때문 — 같은 금액 두 번은 진짜 환불 2건이라 journal 도 2개가 정답이다(위 javadoc).
         Journal journal = ledgerService.recordRefund(payment, amount);
         Refund refund = refundRepository.save(new Refund(payment, amount, journal));
+
+        // refund.requested 를 같은 tx 에 append(W3D1). 역분개 journal 을 거울처럼 읽은 fat 스냅샷.
+        // 금액 누적·refund·journal·event 가 한 덩어리로 커밋 — 어느 하나만 남는 드리프트가 불가능.
+        outboxWriter.append(payment.getId(), EventType.REFUND_REQUESTED,
+                RefundRequestedEvent.from(payment, refund, journal));
         return new RefundOutcome.Accepted(refund);
     }
 }

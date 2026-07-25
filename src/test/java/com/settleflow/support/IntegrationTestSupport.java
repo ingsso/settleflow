@@ -11,6 +11,8 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.PostgreSQLContainer;
+import org.testcontainers.kafka.KafkaContainer;
+import org.testcontainers.utility.DockerImageName;
 
 import java.util.List;
 
@@ -47,16 +49,33 @@ public abstract class IntegrationTestSupport {
     static final GenericContainer<?> REDIS =
             new GenericContainer<>(TestImages.REDIS).withExposedPorts(6379);
 
+    /**
+     * Kafka(W3D1). {@code @ServiceConnection} 이 bootstrap-servers 를 컨테이너 포트로 자동 배선한다 —
+     * KafkaContainer 가 advertised.listeners 를 매핑 포트로 맞춰주므로 compose 의 9092 고정 트릭이
+     * 테스트에선 불필요하다. 싱글턴이라 스위트당 한 번만 뜬다.
+     */
+    @ServiceConnection
+    static final KafkaContainer KAFKA =
+            new KafkaContainer(DockerImageName.parse(TestImages.KAFKA));
+
     static {
         // 한 번만 켜고 스위트 내내 유지 — @Container 의 클래스별 stop 을 대체한다.
         POSTGRES.start();
         REDIS.start();
+        KAFKA.start();
     }
 
     @DynamicPropertySource
-    static void redisProperties(DynamicPropertyRegistry registry) {
+    static void testProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        // 아웃박스 릴레이 Quartz job 이 테스트마다 제멋대로 폴링하면 published_at 단언이 흔들린다.
+        // 자동시작을 끄고 테스트가 relay.publishBatch() 를 직접 불러 결정적으로 검증한다.
+        registry.add("spring.quartz.auto-startup", () -> "false");
+    }
+
+    protected static String kafkaBootstrapServers() {
+        return KAFKA.getBootstrapServers();
     }
 
     @Autowired private EntityManager em;
@@ -75,7 +94,7 @@ public abstract class IntegrationTestSupport {
     void cleanDatabase() {
         new TransactionTemplate(cleanupTxManager).executeWithoutResult(s -> {
             List<String> tablesChildFirst = List.of(
-                    "ledger_entry", "refund", "payment", "order_item",
+                    "outbox", "ledger_entry", "refund", "payment", "order_item",
                     "orders", "journal", "product", "seller");
             tablesChildFirst.forEach(t ->
                     em.createNativeQuery("DELETE FROM " + t).executeUpdate());
