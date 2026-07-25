@@ -42,14 +42,7 @@ class OrderPlacementTest extends IntegrationTestSupport {
     @BeforeEach
     void setUp() {
         tx = new TransactionTemplate(txManager);
-        tx.executeWithoutResult(s -> {
-            em.createNativeQuery("DELETE FROM refund").executeUpdate();
-            em.createNativeQuery("DELETE FROM payment").executeUpdate();
-            em.createNativeQuery("DELETE FROM order_item").executeUpdate();
-            em.createNativeQuery("DELETE FROM orders").executeUpdate();
-            em.createNativeQuery("DELETE FROM product").executeUpdate();
-            em.createNativeQuery("DELETE FROM seller").executeUpdate();
-        });
+        // DB 초기화는 IntegrationTestSupport.cleanDatabase() 가 먼저 처리한다.
     }
 
     // ---------- 1. 관통 ----------

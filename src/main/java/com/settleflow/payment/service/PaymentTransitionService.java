@@ -1,9 +1,14 @@
 package com.settleflow.payment.service;
 
+import com.settleflow.ledger.domain.Journal;
+import com.settleflow.ledger.service.LedgerService;
 import com.settleflow.order.domain.Order;
 import com.settleflow.order.domain.OrderTransitionResult;
+import com.settleflow.outbox.domain.EventType;
+import com.settleflow.outbox.service.OutboxWriter;
 import com.settleflow.payment.domain.Payment;
 import com.settleflow.payment.domain.TransitionResult;
+import com.settleflow.payment.event.PaymentCompletedEvent;
 import com.settleflow.payment.repository.PaymentRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,11 +38,17 @@ public class PaymentTransitionService {
     private static final int MAX_ATTEMPTS = 3;
 
     private final PaymentRepository paymentRepository;
+    private final LedgerService ledgerService;
+    private final OutboxWriter outboxWriter;
     private final TransactionTemplate txTemplate;
 
     public PaymentTransitionService(PaymentRepository paymentRepository,
+                                    LedgerService ledgerService,
+                                    OutboxWriter outboxWriter,
                                     PlatformTransactionManager txManager) {
         this.paymentRepository = paymentRepository;
+        this.ledgerService = ledgerService;
+        this.outboxWriter = outboxWriter;
         this.txTemplate = new TransactionTemplate(txManager);
     }
 
@@ -52,6 +63,16 @@ public class PaymentTransitionService {
         return dispatch(merchantPaymentId, pgTransactionId,
                 Payment::onApproved,
                 payment -> {
+                    // 돈은 들어왔다 — 주문 상태와 무관하게 분개는 남긴다. TRANSITIONED 1회에만 불리므로
+                    // 중복 웹훅이 와도 journal 은 하나(W2D1 §4). tx2 안이라 PAID·journal 이 원자적으로 함께 커밋.
+                    Journal journal = ledgerService.recordPayment(payment);
+                    payment.linkJournal(journal);
+
+                    // payment.completed 를 같은 tx 에 append(W3D1). fat 스냅샷은 방금 만든 journal 을
+                    // 거울처럼 읽어 만든다 — 이벤트와 장부가 갈라질 수 없다. journal 과 함께 원자적으로 커밋.
+                    outboxWriter.append(payment.getId(), EventType.PAYMENT_COMPLETED,
+                            PaymentCompletedEvent.from(payment, journal));
+
                     if (payment.getOrder().onPaymentConfirmed() == OrderTransitionResult.CONFLICT) {
                         recordOrderAnomaly(payment);
                     }

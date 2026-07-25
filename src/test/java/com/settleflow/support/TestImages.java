@@ -8,6 +8,7 @@ public final class TestImages {
 
     public static final String POSTGRES = "postgres:17";
     public static final String REDIS = "redis:7";
+    public static final String KAFKA = "apache/kafka:3.9.1";   // compose.yaml 과 동일 태그
 
     private TestImages() {
     }

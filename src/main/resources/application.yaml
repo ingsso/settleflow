@@ -1,3 +1,10 @@
 spring:
   application:
     name: settleflow
+  # 아웃박스 릴레이가 String 키(aggregateId)·String 값(JSON payload)을 그대로 보낸다(W3D1).
+  # bootstrap-servers 는 설정하지 않는다 — 로컬은 compose 의 9092 고정과 Spring Kafka 기본값이
+  # 일치하고, 테스트는 Testcontainers @ServiceConnection 이 컨테이너 포트로 덮어쓴다.
+  kafka:
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
