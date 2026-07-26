@@ -4,6 +4,7 @@ import com.settleflow.order.service.OrderService;
 import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.repository.PaymentRepository;
+import com.settleflow.payment.service.RefundConfirmService;
 import com.settleflow.payment.service.RefundService;
 import com.settleflow.product.domain.Product;
 import com.settleflow.seller.domain.Seller;
@@ -37,6 +38,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
     @Autowired OrderService orderService;
     @Autowired PaymentRepository paymentRepository;
     @Autowired RefundService refundService;
+    @Autowired RefundConfirmService refundConfirmService;
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
 
@@ -51,7 +53,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long productId = createProduct("셀러A", 500, 10_000L, 5);
         Long paymentId = paidOrder(Map.of(productId, 2));            // 20,000
 
-        RefundOutcome result = refundService.requestRefund(paymentId, 5_000L);
+        RefundOutcome result = refundAndConfirm(paymentId, 5_000L);
 
         long refundJournals = count("SELECT count(*) FROM journal WHERE type = 'REFUND'");
         long lines = count(refundEntries("count(*)"));
@@ -80,7 +82,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long productId = createProduct("셀러A", 500, 10_000L, 5);
         Long paymentId = paidOrder(Map.of(productId, 2));
 
-        refundService.requestRefund(paymentId, 5_000L);
+        refundAndConfirm(paymentId, 5_000L);
 
         long linked = count("SELECT count(*) FROM refund r JOIN journal j ON j.id = r.journal_id"
                 + " WHERE j.type = 'REFUND'");
@@ -100,7 +102,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long p2 = createProduct("셀러B", 500, 8_000L, 5);
         Long paymentId = paidOrder(Map.of(p1, 1, p2, 1));            // 12,000 + 8,000 = 20,000
 
-        refundService.requestRefund(paymentId, 5_000L);              // 6:4 → 3,000 / 2,000
+        refundAndConfirm(paymentId, 5_000L);              // 6:4 → 3,000 / 2,000
 
         List<Long> portions = refundPortionsBySellerId();
         long cash = sum(refundEntries("coalesce(sum(e.amount),0)") + " AND e.account = 'CASH'");
@@ -123,7 +125,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
 
         // 5,001 을 5:5 로 → 각 2,500.5. 둘 다 반올림하면 5,002(초과), 둘 다 버리면 5,000(부족).
         // 마지막 셀러를 뺄셈으로 구하므로 합은 정의상 5,001 이다.
-        refundService.requestRefund(paymentId, 5_001L);
+        refundAndConfirm(paymentId, 5_001L);
 
         List<Long> portions = refundPortionsBySellerId();
         long cash = sum(refundEntries("coalesce(sum(e.amount),0)") + " AND e.account = 'CASH'");
@@ -144,7 +146,7 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long p3 = createProduct("셀러C", 500, 4_000L, 5);
         Long paymentId = paidOrder(Map.of(p1, 1, p2, 1, p3, 1));     // 17,000
 
-        refundService.requestRefund(paymentId, 3_333L);              // 어느 셀러도 안 떨어진다
+        refundAndConfirm(paymentId, 3_333L);              // 어느 셀러도 안 떨어진다
 
         List<Long> portions = refundPortionsBySellerId();
         long payable = sum(refundEntries("coalesce(sum(e.amount),0)") + " AND e.account = 'SELLER_PAYABLE'");
@@ -163,9 +165,9 @@ class RefundLedgerTest extends IntegrationTestSupport {
         long productId = createProduct("셀러A", 500, 10_000L, 5);
         Long paymentId = paidOrder(Map.of(productId, 2));            // 20,000
 
-        refundService.requestRefund(paymentId, 8_000L);
-        refundService.requestRefund(paymentId, 7_000L);
-        refundService.requestRefund(paymentId, 5_000L);              // 누적 20,000 = 전액
+        refundAndConfirm(paymentId, 8_000L);
+        refundAndConfirm(paymentId, 7_000L);
+        refundAndConfirm(paymentId, 5_000L);              // 누적 20,000 = 전액
 
         long journals = count("SELECT count(*) FROM journal");
         long refundJournals = count("SELECT count(*) FROM journal WHERE type = 'REFUND'");
@@ -209,6 +211,25 @@ class RefundLedgerTest extends IntegrationTestSupport {
     }
 
     // ---------- helpers ----------
+
+    /**
+     * 환불 요청 + PG 확정까지(W3D2). 역분개는 이제 <b>PG 확인 뒤</b>에 생기므로, 장부를 보는
+     * 테스트는 Saga 두 다리를 모두 태워야 한다.
+     *
+     * <p>Kafka 를 끼우지 않고 {@code confirm()} 을 직접 부른다 — 소비 타이밍이 비결정적이면 아래
+     * 단언들이 흔들린다(W3D1 에서 {@code publishBatch()} 를 직접 부른 것과 같은 이유). 이 테스트가
+     * 보는 건 안분·반올림·균형이지 배달이 아니다. 배달은 {@code RefundSagaTest} 가 본다.
+     *
+     * <p>금액은 전부 스텁 PG 가 승인하는 값이다 — {@code % 1000} 이 111(거절)·222(타임아웃)가
+     * 아니어야 한다({@code StubPgClient}).
+     */
+    RefundOutcome refundAndConfirm(Long paymentId, long amount) {
+        RefundOutcome outcome = refundService.requestRefund(paymentId, amount);
+        if (outcome instanceof RefundOutcome.Accepted a) {
+            refundConfirmService.confirm(a.refund().getId());
+        }
+        return outcome;
+    }
 
     long createProduct(String sellerName, int feeRateBp, long price, int stock) {
         return tx().execute(s -> {

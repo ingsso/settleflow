@@ -90,8 +90,13 @@ class OutboxRelayTest extends IntegrationTestSupport {
         assertThat(compact(rec.value())).contains("\"amount\":20000");
     }
 
+    /**
+     * W3D2 에서 이 이벤트가 <b>thin 이 됐다</b>. 역분개를 PG 확인 뒤로 미루면서 요청 시점엔 비출
+     * journal 이 없어졌고, 안분을 미리 계산해 담으면 "재계산이 아니라 거울처럼 읽는다"는 W3D1 §4
+     * 방어가 무너지기 때문이다. 셀러별 내역은 {@code refund.completed} 로 옮겨갔다.
+     */
     @Test
-    void 환불시_refund_requested가_발행된다() {
+    void 환불_요청시_thin한_refund_requested가_발행된다() {
         Long paymentId = paidOrder();
         outboxRelay.publishBatch();                     // payment.completed 를 먼저 비운다
 
@@ -101,12 +106,13 @@ class OutboxRelayTest extends IntegrationTestSupport {
         ConsumerRecord<String, String> rec =
                 consume("settlement.refund.requested", String.valueOf(paymentId));
 
-        System.out.printf("[실측] 환불 → publishBatch=%d | Kafka value=%s%n", published, rec.value());
+        System.out.printf("[실측] 환불요청 → publishBatch=%d | Kafka value=%s%n", published, rec.value());
 
         assertThat(published).isEqualTo(1);
         assertThat(compact(rec.value())).contains("\"amount\":5000");
-        assertThat(compact(rec.value())).contains("\"refundStatus\":\"PARTIAL_REFUNDED\"");
-        assertThat(compact(rec.value())).contains("\"sellerId\":");   // fat: 셀러별 안분
+        assertThat(compact(rec.value())).contains("\"refundId\":");
+        // thin — 아직 사실이 아닌 것은 담지 않는다. 장부가 없으니 셀러 내역도 없다.
+        assertThat(compact(rec.value())).doesNotContain("\"sellerId\":");
     }
 
     // ---------- helpers ----------

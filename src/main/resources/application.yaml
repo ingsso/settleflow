@@ -8,3 +8,11 @@ spring:
     producer:
       key-serializer: org.apache.kafka.common.serialization.StringSerializer
       value-serializer: org.apache.kafka.common.serialization.StringSerializer
+    # 환불 Saga 소비자(W3D2). 값은 JSON 문자열 그대로 받아 리스너가 직접 역직렬화한다 —
+    # JsonDeserializer 의 타입 헤더 신뢰 문제를 피하고, 발행 측(String 직렬화)과 대칭을 맞춘다.
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      # 소비자가 붙기 전에 발행된 이벤트도 처리해야 한다 — 아웃박스는 유실을 막으려고 존재하는데
+      # 소비자가 latest 로 시작하면 그 사이 이벤트를 아무도 안 집는다.
+      auto-offset-reset: earliest

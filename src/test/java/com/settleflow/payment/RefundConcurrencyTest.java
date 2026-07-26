@@ -5,6 +5,7 @@ import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.domain.RefundStatus;
 import com.settleflow.payment.repository.PaymentRepository;
+import com.settleflow.payment.service.RefundConfirmService;
 import com.settleflow.payment.service.RefundService;
 import com.settleflow.product.domain.Product;
 import com.settleflow.seller.domain.Seller;
@@ -37,12 +38,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p><b>설계 판단 (나)의 실측 승격.</b> "잔액 조회 → 앱에서 판단 → UPDATE"(가) 대신
  * "조건부 UPDATE 의 영향 행 수가 곧 판정"(나)을 골랐다. (가)였다면 10 스레드가 모두 같은 잔액
  * 20,000 을 읽고 전부 통과해 50,000 이 환불됐을 것이다. 그 차이가 아래 숫자로 나와야 한다.
+ *
+ * <p><b>W3D2 에서 이 테스트의 의미가 커졌다.</b> 역분개를 PG 확인 뒤로 미루면서
+ * {@code refunded_amount} 누적은 요청 시점에 <b>예약</b>으로 남겼는데, 여기서 검증하는 게 정확히
+ * 그 예약이 여전히 동시성을 막는가다. 이 누적까지 미뤘다면 10 스레드가 전부 통과했을 것이다.
+ * 확정 단계까지 태워 <b>예약 4건 = 역분개 4개</b> 로 수렴하는 것도 함께 본다.
  */
 class RefundConcurrencyTest extends IntegrationTestSupport {
 
     @Autowired OrderService orderService;
     @Autowired PaymentRepository paymentRepository;
     @Autowired RefundService refundService;
+    @Autowired RefundConfirmService refundConfirmService;
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
 
@@ -67,8 +74,12 @@ class RefundConcurrencyTest extends IntegrationTestSupport {
         int accepted = 0, exceeded = 0;
         for (Future<RefundOutcome> f : futures) {
             RefundOutcome outcome = f.get();
-            if (outcome instanceof RefundOutcome.Accepted) accepted++;
-            else if (outcome.equals(exceedsRemaining)) exceeded++;
+            if (outcome instanceof RefundOutcome.Accepted a) {
+                accepted++;
+                // Saga 두 번째 다리(W3D2). 소비자가 할 일을 직접 부른다 — Kafka 를 끼우면 타이밍이
+                // 비결정적이라 단언이 흔들린다(W3D1 에서 publishBatch() 를 직접 부른 것과 같은 이유).
+                refundConfirmService.confirm(a.refund().getId());
+            } else if (outcome.equals(exceedsRemaining)) exceeded++;
         }
         pool.shutdown();
 

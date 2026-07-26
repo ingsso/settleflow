@@ -81,6 +81,12 @@ public abstract class IntegrationTestSupport {
         // 아웃박스 릴레이 Quartz job 이 테스트마다 제멋대로 폴링하면 published_at 단언이 흔들린다.
         // 자동시작을 끄고 테스트가 relay.publishBatch() 를 직접 불러 결정적으로 검증한다.
         registry.add("spring.quartz.auto-startup", () -> "false");
+        // Kafka 리스너도 같은 이유로 끈다(W3D2). 켜두면 refund.requested 소비가 테스트와 <b>동시에</b>
+        // PG 를 부르고 장부를 써서 단언이 흔들리고, 더 나쁘게는 테스트가 끝난 뒤 소비가 도착해
+        // 다음 테스트의 cleanDatabase 와 겹친다. 판단·트랜잭션은 전부 서비스에 있으므로 테스트는
+        // 서비스를 직접 부르고, "리스너가 실제로 배선됐는가"만 별도 케이스에서 컨테이너를 손으로
+        // 켜서 확인한다(RefundSagaTest).
+        registry.add("spring.kafka.listener.auto-startup", () -> "false");
     }
 
     protected static String kafkaBootstrapServers() {
