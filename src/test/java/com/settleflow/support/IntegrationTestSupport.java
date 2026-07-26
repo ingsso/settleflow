@@ -65,10 +65,19 @@ public abstract class IntegrationTestSupport {
         KAFKA.start();
     }
 
+    /**
+     * <b>테스트 전용 설정은 전부 여기 둔다.</b> 예전엔 {@code src/test/resources/application.yaml} 에
+     * {@code ddl-auto: validate} 하나가 있었는데, 같은 파일명이라 <b>메인 yaml 을 병합이 아니라 통째로
+     * 가렸다</b> — 테스트에선 {@code spring.kafka.*} 가 아예 안 읽혔다(W3D2 에서 발각). W3D1 이 안 터진 건
+     * 그 값들이 우연히 Boot 기본값과 같아서였고, {@code auto-offset-reset: earliest} 처럼 기본값과 다른
+     * 설정이 생기자 드러났다. 파일을 지우고 이리로 옮겨 가림막을 없앴다.
+     */
     @DynamicPropertySource
     static void testProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        // 엔티티 매핑이 Flyway 스키마와 어긋나면 컨텍스트 로딩부터 실패시킨다(SchemaMappingTest 와 같은 보증).
+        registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
         // 아웃박스 릴레이 Quartz job 이 테스트마다 제멋대로 폴링하면 published_at 단언이 흔들린다.
         // 자동시작을 끄고 테스트가 relay.publishBatch() 를 직접 불러 결정적으로 검증한다.
         registry.add("spring.quartz.auto-startup", () -> "false");
