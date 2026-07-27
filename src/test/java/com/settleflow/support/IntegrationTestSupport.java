@@ -109,7 +109,7 @@ public abstract class IntegrationTestSupport {
     void cleanDatabase() {
         new TransactionTemplate(cleanupTxManager).executeWithoutResult(s -> {
             List<String> tablesChildFirst = List.of(
-                    "outbox", "ledger_entry", "refund", "payment", "order_item",
+                    "settlement", "outbox", "ledger_entry", "refund", "payment", "order_item",
                     "orders", "journal", "product", "seller");
             tablesChildFirst.forEach(t ->
                     em.createNativeQuery("DELETE FROM " + t).executeUpdate());
