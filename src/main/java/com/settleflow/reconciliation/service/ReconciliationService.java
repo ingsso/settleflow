@@ -6,6 +6,10 @@ import com.settleflow.payment.domain.Refund;
 import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.payment.repository.RefundRepository;
 import com.settleflow.reconciliation.domain.Discrepancy;
+import com.settleflow.reconciliation.domain.PgDiscrepancy;
+import com.settleflow.reconciliation.domain.PgDiscrepancyType;
+import com.settleflow.reconciliation.pg.PgReportRow;
+import com.settleflow.reconciliation.pg.PgRowType;
 import com.settleflow.seller.domain.Seller;
 import com.settleflow.settlement.domain.Settlement;
 import com.settleflow.settlement.repository.SettlementRepository;
@@ -18,6 +22,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -125,6 +130,75 @@ public class ReconciliationService {
                 date, from, to, settled.size(), reconstructed.size(), found.size());
         if (!found.isEmpty()) {
             found.forEach(d -> log.warn("[대사 불일치] {}", d));
+        }
+        return found;
+    }
+
+    /**
+     * 외부 축 — 우리 기록 ↔ PG 정산 리포트를 <b>건별</b>로 맞춘다(W3D4 ①-A, ②).
+     *
+     * <h3>왜 건별인가</h3>
+     * 내부 축은 셀러·날짜 합계인데 여기는 거래 단위다. 합계만 맞추면 <b>상쇄가 숨는다</b>
+     * (한 건이 +5,000 크고 다른 건이 −5,000 작으면 총합은 맞다). 그리고 외부 축이 잡으려는 게
+     * 애초에 금액이 아니라 <b>존재</b>라 건별이 아니면 의미가 없다 —
+     * {@link PgDiscrepancyType#ONLY_IN_REPORT}(웹훅 유실)는 합계로는 보이지도 않는다.
+     *
+     * <h3>조인 키</h3>
+     * {@code (type, merchantRef)}. PG 발급 번호를 안 쓰는 이유는 {@code PgReportRow} javadoc 에 —
+     * 결제의 {@code pg_transaction_id} 는 웹훅으로만 채워져 동기 승인 경로는 비어 있다.
+     *
+     * <h3>비교하는 금액은 gross 하나</h3>
+     * 리포트가 실어오는 {@code pgFee}·{@code netAmount} 는 <b>읽지만 안 쓴다</b>(④-나).
+     * 우리 장부에 PG 수수료 계정이 없어서({@code LedgerAccount} 셋 중 없다) 비교하면 매 건 차이가
+     * 나는데, 그건 버그가 아니라 모델에 계정이 없어서 생기는 구조적 차이다. 쓰려면 계정 추가가
+     * 먼저다(V10 + W2D1 분개 정책 변경 — 오늘 스코프 밖).
+     *
+     * @param report 그날의 PG 리포트 행들. 운영에선 PG 가 주고, 테스트에선 {@code PgReportGenerator}
+     *               가 만든다 — <b>후자는 우리 DB 에서 나오므로 정상 케이스가 0 건인 건 당연하다</b>.
+     *               값은 심은 불일치를 잡느냐에 있다(그 javadoc 참고)
+     */
+    @Transactional(readOnly = true)
+    public List<PgDiscrepancy> reconcileWithPgReport(LocalDate date, List<PgReportRow> report) {
+        OffsetDateTime from = date.atStartOfDay(SettlementService.ZONE).toOffsetDateTime();
+        OffsetDateTime to = date.plusDays(1).atStartOfDay(SettlementService.ZONE).toOffsetDateTime();
+
+        Map<PgReportRow.Key, Long> internal = new HashMap<>();
+        for (Payment p : paymentRepository.findPaidInRange(from, to)) {
+            internal.put(new PgReportRow.Key(PgRowType.PAYMENT, p.getMerchantPaymentId().toString()),
+                    p.getAmount());
+        }
+        for (Refund r : refundRepository.findCompletedInRange(from, to)) {
+            internal.put(new PgReportRow.Key(PgRowType.REFUND, String.valueOf(r.getId())),
+                    r.getAmount());
+        }
+
+        Map<PgReportRow.Key, Long> external = new HashMap<>();
+        for (PgReportRow row : report) {
+            external.put(row.key(), row.grossAmount());
+        }
+
+        // 키를 문자열로 정렬해 결과 순서를 결정적으로 만든다(내부 축의 TreeSet 과 같은 이유).
+        List<PgDiscrepancy> found = new ArrayList<>();
+        List<PgReportRow.Key> keys = new ArrayList<>(union(internal.keySet(), external.keySet()));
+        keys.sort(Comparator.comparing(PgReportRow.Key::toString));
+
+        for (PgReportRow.Key key : keys) {
+            Long mine = internal.get(key);
+            Long theirs = external.get(key);
+
+            if (mine == null) {
+                found.add(PgDiscrepancy.onlyInReport(key.type(), key.merchantRef(), date, theirs));
+            } else if (theirs == null) {
+                found.add(PgDiscrepancy.onlyInInternal(key.type(), key.merchantRef(), date, mine));
+            } else if (!mine.equals(theirs)) {
+                found.add(PgDiscrepancy.amountMismatch(key.type(), key.merchantRef(), date, mine, theirs));
+            }
+        }
+
+        log.info("PG 대사 date={} 내부={}건 리포트={}건 불일치={}건",
+                date, internal.size(), external.size(), found.size());
+        if (!found.isEmpty()) {
+            found.forEach(d -> log.warn("[PG 대사 불일치] {}", d));
         }
         return found;
     }
