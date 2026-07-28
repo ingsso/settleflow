@@ -6,6 +6,8 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.OffsetDateTime;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -16,6 +18,32 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
      * pg_transaction_id 는 PENDING 생성 시점엔 NULL 이라 매칭에 못 쓴다.
      */
     Optional<Payment> findByMerchantPaymentId(UUID merchantPaymentId);
+
+    /**
+     * 그 시간 범위에 <b>승인 분개가 찍힌</b> 결제들(W3D4 대사).
+     *
+     * <h3>왜 payment 의 시각 컬럼을 안 쓰나</h3>
+     * 쓸 수 있는 게 없다. {@code created_at} 은 PENDING 생성 시점이라 승인 시각이 아니고,
+     * {@code updated_at} 은 {@link #reserveRefund} 도 갱신하므로 <b>나중에 환불 요청이 들어오면
+     * 그 결제의 시각이 환불일로 밀린다</b>(7/1 결제가 7/5 환불되면 7/1 대사에서 사라진다).
+     * 이 테이블엔 "승인 시각" 컬럼이 없다.
+     *
+     * <p>그래서 <b>journal 을 경유해 시각만 빌린다</b>. 대사가 장부와 공유하는 건 여기까지 —
+     * <i>어느 결제가 이 날짜에 속하는가</i>이고, <i>그 결제가 얼마인가</i>는 전부 독립 계산이다
+     * ({@code ReconciliationService}). 그 대가로 <b>날짜 경계 로직의 버그는 잡히지 않는다</b>
+     * (배치가 경계를 잘못 잡으면 대사도 같이 잘못 잡는다). 금액 계산 버그는 잡힌다.
+     *
+     * <p>PAID 결제만 {@code journal_id} 를 갖는다(W2D1 §3)므로 JOIN 이 상태 필터를 겸한다.
+     */
+    @Query(value = """
+            SELECT p.*
+              FROM payment p
+              JOIN journal j ON j.id = p.journal_id
+             WHERE j.created_at >= :from
+               AND j.created_at <  :to
+             ORDER BY p.id
+            """, nativeQuery = true)
+    List<Payment> findPaidInRange(@Param("from") OffsetDateTime from, @Param("to") OffsetDateTime to);
 
     /**
      * 환불 금액을 원자적으로 <b>예약</b>한다(W2D4, 개명 W3D4). <b>판정과 실행이 한 문장이다</b> —

@@ -6,6 +6,9 @@ import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
+import java.time.OffsetDateTime;
+import java.util.List;
+
 /**
  * 환불 Saga 의 상태 전이(W3D2). 셋 다 <b>{@code WHERE ... AND pg_status = 'REQUESTED'}</b> 를 달고
  * 있고, 그 영향 행 수가 곧 <b>"내가 이 이벤트를 처음 처리하는가"</b>의 답이다.
@@ -62,6 +65,30 @@ public interface RefundRepository extends JpaRepository<Refund, Long> {
                AND r.pg_status = 'COMPLETED'
             """, nativeQuery = true)
     long sumCompletedAmount(@Param("paymentId") Long paymentId);
+
+    /**
+     * 그 시간 범위에 <b>확정된</b> 환불들(W3D4 대사).
+     *
+     * <p>기준 시각이 {@code created_at}(요청) 이 아니라 {@code confirmed_at} 인 이유: 장부에 역분개가
+     * 적히는 건 확정 시점이고({@code RefundConfirmService.applyCompleted}), 대사는 그 장부와 맞춰야
+     * 한다. 요청 기준으로 잡으면 자정을 넘겨 확정된 환불이 장부와 다른 날에 걸린다.
+     *
+     * <p><b>알려진 거짓 양성 하나</b>: 배치는 역분개 {@code journal.created_at}(JVM {@code @PrePersist})
+     * 을, 대사는 여기 {@code confirmed_at}(SQL {@code now()} = 트랜잭션 시작 시각)을 본다. 같은 tx 라
+     * 밀리초 차이지만 <b>자정 경계에 걸치면 1건이 갈릴 수 있다.</b>
+     *
+     * <p>{@code COMPLETED} 만 세는 건 W3D4 에서 라벨의 원천을 정한 기준과 같다 — REQUESTED·UNKNOWN 은
+     * 장부에 아무것도 없으므로 정산에도 없어야 한다.
+     */
+    @Query(value = """
+            SELECT r.*
+              FROM refund r
+             WHERE r.pg_status = 'COMPLETED'
+               AND r.confirmed_at >= :from
+               AND r.confirmed_at <  :to
+             ORDER BY r.id
+            """, nativeQuery = true)
+    List<Refund> findCompletedInRange(@Param("from") OffsetDateTime from, @Param("to") OffsetDateTime to);
 
     /**
      * PG 환불 성공 → COMPLETED. 역분개 journal·PG 번호·확정시각을 <b>한 문장에서 함께</b> 채운다.
