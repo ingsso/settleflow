@@ -70,7 +70,7 @@ class RefundSagaTest extends IntegrationTestSupport {
         String pgStatus = pgStatusOf(paymentId);
         long linkedJournal = count("SELECT count(*) FROM refund WHERE journal_id IS NOT NULL");
 
-        System.out.printf("[실측] 요청만 → REFUND journal=%d 예약(refunded_amount)=%,d pg_status=%s journal연결=%d%n",
+        System.out.printf("[실측] 요청만 → REFUND journal=%d 예약(reserved_refund_amount)=%,d pg_status=%s journal연결=%d%n",
                 refundJournals, reserved, pgStatus, linkedJournal);
 
         assertThat(refundJournals).isZero();        // 아직 아무 일도 확정되지 않았다
@@ -321,9 +321,10 @@ class RefundSagaTest extends IntegrationTestSupport {
                 "SELECT pg_status FROM refund WHERE payment_id = " + paymentId).getSingleResult();
     }
 
+    /** 예약(가드가 보는 값). W3D4 이전 이름은 {@code refunded_amount} — V9 에서 개명. */
     private long refundedAmount(Long paymentId) {
         return ((Number) em.createNativeQuery(
-                "SELECT refunded_amount FROM payment WHERE id = " + paymentId)
+                "SELECT reserved_refund_amount FROM payment WHERE id = " + paymentId)
                 .getSingleResult()).longValue();
     }
 

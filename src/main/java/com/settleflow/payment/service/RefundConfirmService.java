@@ -154,8 +154,13 @@ public class RefundConfirmService {
 
             // refund.completed 를 같은 tx 에 append. fat 스냅샷은 방금 만든 journal 을 거울처럼
             // 읽는다(W3D1 §4) — 이벤트와 장부가 갈라질 수 없다.
+            //
+            // 확정합은 반드시 markCompleted <뒤에> 센다(W3D4). 앞에서 세면 방금 확정시킨 이 건이
+            // 빠져 라벨이 한 건만큼 뒤처진다. markCompleted 는 flushAutomatically 라 이 네이티브
+            // SELECT 가 같은 tx 안에서 그 UPDATE 를 본다.
+            long completedAmount = refundRepository.sumCompletedAmount(pending.paymentId());
             outboxWriter.append(pending.paymentId(), EventType.REFUND_COMPLETED,
-                    RefundCompletedEvent.from(payment, refund, journal, pgRefundId));
+                    RefundCompletedEvent.from(payment, refund, journal, pgRefundId, completedAmount));
             return RefundPgStatus.COMPLETED;
         });
     }
@@ -170,7 +175,7 @@ public class RefundConfirmService {
                 throw new ConcurrentRefundConfirmException(refundId);
             }
             // 예약 해제. 상태 전이가 먼저 성공했으므로 이 해제는 정확히 한 번만 일어난다.
-            if (paymentRepository.releaseRefundedAmount(pending.paymentId(), pending.amount()) == 0) {
+            if (paymentRepository.releaseRefundReservation(pending.paymentId(), pending.amount()) == 0) {
                 // 언더플로 — 예약한 적 없는 금액을 풀려 했다. 앱의 짝이 안 맞는다(프로그래밍 오류).
                 throw new IllegalStateException(
                         "예약 해제 실패 refundId=%d paymentId=%d amount=%d"

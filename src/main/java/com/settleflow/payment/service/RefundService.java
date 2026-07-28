@@ -25,7 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
  * 도구다). 안 적으면 지울 일도 없다.
  *
  * <p><b>대신 금액 누적은 그대로 남는다.</b> 이건 이제 "환불됨"이 아니라 <b>예약</b>이다 —
- * {@link PaymentRepository#addRefundedAmount} 의 조건부 UPDATE 가 과다환불을 막는 유일한 판정이라,
+ * {@link PaymentRepository#reserveRefund} 의 조건부 UPDATE 가 과다환불을 막는 유일한 판정이라,
  * 이것까지 미루면 잔액을 판정할 근거가 아직 없어 동시 환불이 전부 통과한다(W1D2 실측: 8,000 이
  * 11,000). W1D3 의 재고와 같은 모양 — 주문 시 원자적으로 잡아두고, 결제가 안 되면 되돌린다.
  *
@@ -38,7 +38,7 @@ import org.springframework.transaction.annotation.Transactional;
  *   2. FAILED 환불         → 앱 (받은 적이 없다)
  *   3. UNKNOWN 환불        → 앱 (정보의 부재 — 별도 사유로 구분)
  *   4. 0원·음수 환불        → 앱 + DB CHECK(chk_refund_amount)
- *   5. 잔액 초과           → SQL 조건부 UPDATE + DB CHECK(chk_payment_refunded_amount)
+ *   5. 잔액 초과           → SQL 조건부 UPDATE + DB CHECK(chk_payment_reserved_refund_amount)
  *   6. 전액환불 후 추가환불 → 5 에 흡수됨 (별도 가드 불필요)
  * </pre>
  *
@@ -48,8 +48,12 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p><b>앱 가드가 금액을 안 보는 이유.</b> "잔액 조회 → 충분한지 판단 → UPDATE" 는 읽기와 쓰기
  * 사이의 틈에서 동시 환불이 둘 다 통과한다(W1D2 실측: 8,000 이어야 할 값이 11,000). 그래서 금액
- * 판정은 {@link PaymentRepository#addRefundedAmount} 한 문장에 맡기고, 앱은 손대지 않는다.
+ * 판정은 {@link PaymentRepository#reserveRefund} 한 문장에 맡기고, 앱은 손대지 않는다.
  * 친절한 사전 안내가 필요하면 그건 UX 계층(컨트롤러)의 일이지 정합성 가드가 아니다.
+ *
+ * <p><b>W3D4 에 그 "친절한 사전 안내"가 실제로 생겼다</b> — 접수 응답이
+ * {@code remainingRefundable} 을 같이 준다({@link RefundOutcome.Accepted}). 여전히 가드가 아니다:
+ * 읽은 뒤 다음 UPDATE 사이에 다른 환불이 끼어들 수 있어 <b>안내지 보증이 아니다.</b>
  */
 @Service
 public class RefundService {
@@ -98,11 +102,12 @@ public class RefundService {
         }
 
         // --- SQL 가드: 판정과 실행이 한 문장. 영향 행 수가 곧 판정이다 ---
-        if (paymentRepository.addRefundedAmount(paymentId, amount) == 0) {
+        if (paymentRepository.reserveRefund(paymentId, amount) == 0) {
             return new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING);
         }
 
-        // 네이티브 UPDATE 는 영속성 컨텍스트를 모른다 — 새로고침해야 refundStatus() 가 최신을 본다.
+        // 네이티브 UPDATE 는 영속성 컨텍스트를 모른다 — 새로고침해야 remainingRefundable() 이
+        // 방금 잡은 예약을 반영한 값을 본다.
         em.refresh(payment);
 
         // 위 UPDATE 가 1행을 갱신했다는 건 "이 환불 요청을 받아준다"는 판정이다(W3D2 부터는
@@ -116,6 +121,13 @@ public class RefundService {
         // 거울이 없다(RefundRequestedEvent javadoc). 셀러별 내역은 refund.completed 가 싣는다.
         outboxWriter.append(payment.getId(), EventType.REFUND_REQUESTED,
                 RefundRequestedEvent.from(refund));
-        return new RefundOutcome.Accepted(refund);
+
+        // 201 바디에 실을 두 축(W3D4 결정 3-다). 라벨은 <확정> 환불액에서 파생하므로 방금 접수한
+        // 이 건은 안 들어간다 — 그래서 전액 환불을 요청해도 여기선 NOT_REFUNDED 다. 그게 사실이다
+        // (PG 를 아직 안 불렀다). 대신 remainingRefundable 이 0 이라 "더는 못 받는다"가 같이 나가고,
+        // 그 둘이 있어야 다음 요청의 409 가 응답만 보고 설명된다.
+        long completedAmount = refundRepository.sumCompletedAmount(paymentId);
+        return new RefundOutcome.Accepted(
+                refund, payment.refundStatus(completedAmount), payment.remainingRefundable());
     }
 }

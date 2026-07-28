@@ -33,7 +33,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link com.settleflow.payment.domain.RefundOutcome} → 상태코드 매핑을 밟는다.
  *
  * <pre>
- *   Accepted                    201  { refundId, amount, refundStatus }
+ *   Accepted                    201  { refundId, amount, refundStatus, remainingRefundable }
  *   Rejected(NOT_REFUNDABLE)    409
  *   Rejected(EXCEEDS_REMAINING) 409
  *   Rejected(PAYMENT_UNKNOWN)   503 + Retry-After
@@ -52,18 +52,48 @@ class RefundApiTest extends IntegrationTestSupport {
     @LocalServerPort int port;
     final HttpClient http = HttpClient.newHttpClient();
 
+    /**
+     * <b>201 은 결과가 아니라 접수증이다</b>(W3D2 이후로 환불은 Saga 다). W3D4 에 바디가 그 성격에
+     * 맞춰졌다 — 라벨은 <b>확정</b> 기준이라 아직 {@code NOT_REFUNDED} 이고, 옆칸에 예약 기준
+     * 잔여액이 같이 나간다. 예전엔 라벨이 예약에서 파생돼 여기서 {@code PARTIAL_REFUNDED} 가 떴다.
+     */
     @Test
-    void 정상_부분환불은_201과_refund요약을_돌려준다() {
+    void 정상_부분환불은_201과_접수증을_돌려준다() {
         Long paymentId = paidOrder();   // 20,000
 
         HttpResponse<String> res = postRefund(paymentId, "{\"amount\":5000}");
 
-        System.out.printf("[실측] 5,000 부분환불 → HTTP%d body=%s%n", res.statusCode(), res.body());
+        System.out.printf("[실측] 5,000 부분환불 요청 → HTTP%d body=%s%n", res.statusCode(), res.body());
 
         assertThat(res.statusCode()).isEqualTo(201);
         assertThat(res.body()).contains("\"amount\":5000");
-        assertThat(res.body()).contains("\"refundStatus\":\"PARTIAL_REFUNDED\"");
         assertThat(res.body()).contains("\"refundId\":");
+        // PG 를 아직 안 불렀다 — 확정된 환불은 0 이다.
+        assertThat(res.body()).contains("\"refundStatus\":\"NOT_REFUNDED\"");
+        // 그래도 예약은 잡혔다. 이 값이 있어야 "왜 15,000 초과는 409 인지"가 응답만 보고 설명된다.
+        assertThat(res.body()).contains("\"remainingRefundable\":15000");
+    }
+
+    /**
+     * 두 축이 갈라지는 구간을 HTTP 표면에서 본다(W3D4 결정 3-다). 전액을 <i>요청만</i> 하면
+     * 라벨은 "환불 없음"인데 잔여는 0 이다 — 모순처럼 읽히지만 둘 다 참이고, 이 조합이 바로 다음
+     * 요청의 409 를 미리 설명한다. 라벨 하나만 줬다면(결정 3-가) 설명이 불가능한 자리.
+     */
+    @Test
+    void 전액환불_요청_직후_응답이_다음_요청의_409를_미리_설명한다() {
+        Long paymentId = paidOrder();   // 20,000
+
+        HttpResponse<String> accepted = postRefund(paymentId, "{\"amount\":20000}");
+        HttpResponse<String> rejected = postRefund(paymentId, "{\"amount\":1}");
+
+        System.out.printf("[실측] 전액 요청 → HTTP%d body=%s%n", accepted.statusCode(), accepted.body());
+        System.out.printf("[실측] 그 뒤 1원 → HTTP%d body=%s%n", rejected.statusCode(), rejected.body());
+
+        assertThat(accepted.statusCode()).isEqualTo(201);
+        assertThat(accepted.body()).contains("\"refundStatus\":\"NOT_REFUNDED\"");   // 확정 기준
+        assertThat(accepted.body()).contains("\"remainingRefundable\":0");           // 예약 기준
+        assertThat(rejected.statusCode()).isEqualTo(409);
+        assertThat(rejected.body()).contains("EXCEEDS_REMAINING");
     }
 
     @Test

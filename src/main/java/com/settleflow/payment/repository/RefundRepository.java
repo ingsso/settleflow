@@ -18,12 +18,50 @@ import org.springframework.data.repository.query.Param;
  * INSERT 할 게 없다 — {@code refund} 행은 요청 시점에 이미 만들어져 있고 소비자는 그걸 <i>갱신</i>할
  * 뿐이다. W1D4 의 SETNX 가 통했던 건 웹훅 핸들러가 키를 <b>직접 만들었기</b> 때문이고, 여기엔 그
  * 대칭이 없다. 그래서 멱등을 INSERT 충돌이 아니라 <b>조건부 UPDATE 의 영향 행 수</b>에 건다 —
- * {@code addRefundedAmount}·{@code decreaseStock} 이 쓴 것과 같은 패턴이다.
+ * {@code reserveRefund}·{@code decreaseStock} 이 쓴 것과 같은 패턴이다.
  *
  * <p>네이티브인 이유는 대상 컬럼들이 엔티티에서 {@code updatable = false} 이기 때문이다
- * ({@link Refund} 주석) — JPA 로는 못 쓰고 이 경로로만 쓴다. {@code addRefundedAmount} 와 같은 설계.
+ * ({@link Refund} 주석) — JPA 로는 못 쓰고 이 경로로만 쓴다. {@code reserveRefund} 와 같은 설계.
  */
 public interface RefundRepository extends JpaRepository<Refund, Long> {
+
+    /**
+     * 이 결제의 <b>확정된</b> 환불액 합(W3D4). {@link com.settleflow.payment.domain.RefundStatus} 라벨의
+     * 원천이다.
+     *
+     * <h3>왜 payment 컬럼이 아니라 여기서 세나</h3>
+     * {@code payment.reserved_refund_amount}(구 {@code refunded_amount})는 <b>예약</b>이라
+     * COMPLETED + REQUESTED + UNKNOWN 을 다 담는다(V9 주석). 그 값으로 라벨을 만들면 진행중인 환불이
+     * {@code PARTIAL_REFUNDED} 로 보이고, {@code UNKNOWN} 은 쓸이 배치가 없어 영영 안 풀리므로
+     * 그 오차가 <b>영구적</b>이다(W3D2 이월).
+     *
+     * <p>가드는 예약을 <b>포함해야</b> 정확하고(빼면 W1D2 레이스 부활 — 8,000 이 11,000) 라벨은
+     * 예약이 <b>빠져야</b> 정확하다. 한 컬럼이 둘을 겸할 수 없어 <b>라벨이 원천을 옮겼다</b>.
+     *
+     * <h3>왜 저장하지 않나</h3>
+     * {@code payment} 에 확정분 컬럼을 하나 더 두는 길도 있었다(W3D3 §1 의 <i>"복제가 아니라 별개의
+     * 사실"</i> 논리로 정당화된다). 파생을 골랐다 — 이러면 진실은 여전히 하나({@code refund} 행)고,
+     * 그 행은 이미 append-only + 조건부 UPDATE 로만 바뀌므로 드리프트할 경로가 없다.
+     *
+     * <p><b>장부에서 직접 세지 못하는 이유</b>: {@link com.settleflow.ledger.domain.Journal} 에
+     * payment 참조가 없다(필드는 {@code type}/{@code createdAt}/{@code entries} 뿐). 결제↔장부 연결은
+     * {@code payment.journal_id} 와 {@code refund.journal_id} 쪽이 들고 있어, 결국 {@code refund} 행을
+     * 경유해야 한다. W3D3 정산이 "장부에서 바로" 집계한 것과 대비되는 자리다.
+     *
+     * <p>{@code COALESCE}: 환불 이력이 없으면 {@code SUM} 이 NULL 이다. 0 이 아니라 NULL 이라
+     * 안 씌우면 라벨 계산이 터진다.
+     *
+     * <p><b>예약과의 차이가 곧 W3D4 대사의 한 축이다</b>:
+     * {@code reserved_refund_amount − 이 합 = PG 확인 대기중 + UNKNOWN 보류중}. 이게 오래 0 이 아니면
+     * UNKNOWN 에 물린 예약이고, 쓸이 배치가 없는 지금 그걸 드러내는 유일한 장치가 대사다.
+     */
+    @Query(value = """
+            SELECT COALESCE(SUM(r.amount), 0)
+              FROM refund r
+             WHERE r.payment_id = :paymentId
+               AND r.pg_status = 'COMPLETED'
+            """, nativeQuery = true)
+    long sumCompletedAmount(@Param("paymentId") Long paymentId);
 
     /**
      * PG 환불 성공 → COMPLETED. 역분개 journal·PG 번호·확정시각을 <b>한 문장에서 함께</b> 채운다.

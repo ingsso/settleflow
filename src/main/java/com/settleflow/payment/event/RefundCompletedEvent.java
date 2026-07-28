@@ -37,8 +37,17 @@ public record RefundCompletedEvent(
     public record SellerDebit(long sellerId, long amount) {
     }
 
+    /**
+     * @param completedAmount 이 결제의 <b>확정</b> 환불액 합. <b>{@code markCompleted} 이후에 센 값</b>이라야
+     *                        방금 확정된 이 건이 포함된다(호출부가 그 순서를 지킨다).
+     *                        W3D4 이전엔 {@code payment.refundStatus()} 가 예약에서 라벨을 파생해,
+     *                        같은 결제에 다른 환불이 요청만 떠 있어도 그 몫까지 실려 나갔다 —
+     *                        <b>한 이벤트 안에 기준이 둘</b>이었다({@code sellers} 는 journal 을 거울로 읽는데
+     *                        라벨만 예약을 읽었다). 이제 둘 다 확정된 사실만 본다.
+     */
     public static RefundCompletedEvent from(Payment payment, Refund refund,
-                                            Journal journal, String pgRefundId) {
+                                            Journal journal, String pgRefundId,
+                                            long completedAmount) {
         List<SellerDebit> sellers = journal.getEntries().stream()
                 .filter(e -> e.getAccount() == LedgerAccount.SELLER_PAYABLE)   // CASH 대변 줄 제외
                 .map(e -> new SellerDebit(e.getSellerId(), e.getAmount()))
@@ -47,6 +56,6 @@ public record RefundCompletedEvent(
 
         return new RefundCompletedEvent(
                 payment.getId(), refund.getId(), pgRefundId, refund.getAmount(),
-                sellers, payment.refundStatus().name(), OffsetDateTime.now());
+                sellers, payment.refundStatus(completedAmount).name(), OffsetDateTime.now());
     }
 }
