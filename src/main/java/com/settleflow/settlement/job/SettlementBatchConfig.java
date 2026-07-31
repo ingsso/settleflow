@@ -29,7 +29,17 @@ public class SettlementBatchConfig {
 
     static final String JOB_NAME = "settlementBatch";
 
-    /** 매일 02:00(KST) — 전날치. 자정 직후가 아니라 새벽인 이유는 {@code settleYesterday()} javadoc. */
+    /**
+     * 매일 02:00(KST).
+     *
+     * <p>W3D3 에선 새벽에 도는 것 자체가 방어였다 — 자정 직전에 시작된 트랜잭션이 자정 뒤에
+     * 커밋되면 배치가 그 줄을 못 보므로, 몇 시간을 두면 그런 줄이 대부분 이미 커밋돼 있다.
+     * <b>줄이는 것이지 없애는 게 아니었다.</b>
+     *
+     * <p>W3D5 이후로는 그 방어가 <b>더 이상 정확성에 필요하지 않다</b>({@code V10} 의 진행 축이
+     * 늦게 커밋된 줄을 제 날짜로 주워온다). 새벽을 유지하는 이유는 이제 정확성이 아니라 부하다 —
+     * 그리고 시각을 앞당길수록 밀린 날짜가 <b>다음 실행까지</b> 미정산으로 남는 시간이 길어진다.
+     */
     private static final String CRON = "0 0 2 * * ?";
 
     @Bean
