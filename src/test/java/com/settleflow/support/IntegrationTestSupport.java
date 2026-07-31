@@ -112,6 +112,7 @@ public abstract class IntegrationTestSupport {
             // 이 테이블은 앱이 아니라 트리거가 채운다(V10) — 테스트가 journal 을 만들면 자동으로
             // 행이 생기므로, 여기서 안 비우면 다음 테스트의 pendingDates() 에 남의 날짜가 섞인다.
             List<String> tablesChildFirst = List.of(
+                    "discrepancy_observation", "reconciliation_run",
                     "settlement", "settlement_pending", "outbox", "ledger_entry", "refund",
                     "payment", "order_item", "orders", "journal", "product", "seller");
             tablesChildFirst.forEach(t ->
