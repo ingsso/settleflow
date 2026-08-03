@@ -15,8 +15,8 @@ public enum EventType {
     REFUND_REQUESTED("refund.requested", "settlement.refund.requested"),
 
     /**
-     * refund.completed — 스키마만 있고 발행 지점은 아직 없다(W3D1). 현재 환불은 동기라 "완료"를
-     * 발행할 자리가 없다. Producer 는 W3D2 consumer/보상 흐름에서 실제 PG 환불이 확인될 때 붙는다.
+     * refund.completed — PG 가 환불을 확정한 순간 발행된다(W3D2 부터).
+     * {@code RefundConfirmService} 가 역분개 journal 을 쓰는 것과 같은 tx 에서 append 한다.
      */
     REFUND_COMPLETED("refund.completed", "settlement.refund.completed");
 

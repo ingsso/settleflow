@@ -5,6 +5,7 @@ import com.settleflow.payment.domain.RefundOutcome;
 import com.settleflow.payment.domain.RefundResult;
 import com.settleflow.payment.domain.RefundStatus;
 import com.settleflow.payment.repository.PaymentRepository;
+import com.settleflow.payment.service.RefundConfirmService;
 import com.settleflow.payment.service.RefundService;
 import com.settleflow.product.domain.Product;
 import com.settleflow.seller.domain.Seller;
@@ -37,12 +38,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p><b>설계 판단 (나)의 실측 승격.</b> "잔액 조회 → 앱에서 판단 → UPDATE"(가) 대신
  * "조건부 UPDATE 의 영향 행 수가 곧 판정"(나)을 골랐다. (가)였다면 10 스레드가 모두 같은 잔액
  * 20,000 을 읽고 전부 통과해 50,000 이 환불됐을 것이다. 그 차이가 아래 숫자로 나와야 한다.
+ *
+ * <p><b>W3D2 에서 이 테스트의 의미가 커졌다.</b> 역분개를 PG 확인 뒤로 미루면서
+ * {@code reserved_refund_amount} 누적은 요청 시점에 <b>예약</b>으로 남겼는데, 여기서 검증하는 게 정확히
+ * 그 예약이 여전히 동시성을 막는가다. 이 누적까지 미뤘다면 10 스레드가 전부 통과했을 것이다.
+ * 확정 단계까지 태워 <b>예약 4건 = 역분개 4개</b> 로 수렴하는 것도 함께 본다.
  */
 class RefundConcurrencyTest extends IntegrationTestSupport {
 
     @Autowired OrderService orderService;
     @Autowired PaymentRepository paymentRepository;
     @Autowired RefundService refundService;
+    @Autowired RefundConfirmService refundConfirmService;
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
 
@@ -67,23 +74,31 @@ class RefundConcurrencyTest extends IntegrationTestSupport {
         int accepted = 0, exceeded = 0;
         for (Future<RefundOutcome> f : futures) {
             RefundOutcome outcome = f.get();
-            if (outcome instanceof RefundOutcome.Accepted) accepted++;
-            else if (outcome.equals(exceedsRemaining)) exceeded++;
+            if (outcome instanceof RefundOutcome.Accepted a) {
+                accepted++;
+                // Saga 두 번째 다리(W3D2). 소비자가 할 일을 직접 부른다 — Kafka 를 끼우면 타이밍이
+                // 비결정적이라 단언이 흔들린다(W3D1 에서 publishBatch() 를 직접 부른 것과 같은 이유).
+                refundConfirmService.confirm(a.refund().getId());
+            } else if (outcome.equals(exceedsRemaining)) exceeded++;
         }
         pool.shutdown();
 
-        long refunded = refundedAmount(paymentId);
+        long reserved = reservedRefundAmount(paymentId);
+        long completed = completedRefundAmount(paymentId);
         long rows = refundRows();
         long refundJournals = refundJournalCount();
         RefundStatus label = refundStatusOf(paymentId);
 
         System.out.printf("[실측] 동시환불 %d스레드×%,d원 (한도 20,000) → ACCEPTED=%d EXCEEDS=%d "
-                        + "| refunded=%,d refund행=%d REFUND journal=%d 라벨=%s%n",
-                threads, refundAmt, accepted, exceeded, refunded, rows, refundJournals, label);
+                        + "| 예약=%,d 확정=%,d refund행=%d REFUND journal=%d 라벨=%s%n",
+                threads, refundAmt, accepted, exceeded, reserved, completed, rows, refundJournals, label);
 
         assertThat(accepted).isEqualTo(4);              // 20,000 / 5,000
         assertThat(exceeded).isEqualTo(6);
-        assertThat(refunded).isEqualTo(20_000L);        // 25,000 이면 lost update — 실패
+        assertThat(reserved).isEqualTo(20_000L);        // 25,000 이면 lost update — 실패
+        // 4건 다 confirm 을 태웠으므로 예약이 전부 확정으로 굳는다. 둘이 갈라지면 그 차가 곧
+        // "PG 확인 대기중 + UNKNOWN 보류중"이다(W3D4 대사의 축).
+        assertThat(completed).isEqualTo(reserved);
         assertThat(rows).isEqualTo(4);                  // 통과한 만큼만 이력이 남는다
         // W2D5 §7 이월 닫음: 환불엔 멱등이 없어 ACCEPTED 4건이면 역분개도 4개가 정답이다.
         // refund행 4개는 봤지만 journal 이 4개인지는 안 봤었다 — 하나라도 새면 장부와 이력이 드리프트.
@@ -111,14 +126,24 @@ class RefundConcurrencyTest extends IntegrationTestSupport {
                 .orElseThrow().getId();
     }
 
+    /** 라벨은 <b>확정</b> 환불액에서 파생한다(W3D4) — 예약이 아니라. */
     RefundStatus refundStatusOf(Long paymentId) {
         return tx().execute(s -> em.find(com.settleflow.payment.domain.Payment.class, paymentId)
-                .refundStatus());
+                .refundStatus(completedRefundAmount(paymentId)));
     }
 
-    long refundedAmount(Long paymentId) {
+    /** 가드가 보는 값(예약 = 확정 + 진행중 + 보류중). W3D4 이전 이름은 {@code refunded_amount}. */
+    long reservedRefundAmount(Long paymentId) {
         return ((Number) em.createNativeQuery(
-                        "SELECT refunded_amount FROM payment WHERE id = " + paymentId)
+                        "SELECT reserved_refund_amount FROM payment WHERE id = " + paymentId)
+                .getSingleResult()).longValue();
+    }
+
+    /** 라벨이 보는 값. 이 테스트는 4건 모두 confirm 까지 태우므로 예약과 같아진다. */
+    long completedRefundAmount(Long paymentId) {
+        return ((Number) em.createNativeQuery(
+                        "SELECT COALESCE(SUM(amount), 0) FROM refund"
+                                + " WHERE payment_id = " + paymentId + " AND pg_status = 'COMPLETED'")
                 .getSingleResult()).longValue();
     }
 

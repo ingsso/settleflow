@@ -65,13 +65,28 @@ public abstract class IntegrationTestSupport {
         KAFKA.start();
     }
 
+    /**
+     * <b>테스트 전용 설정은 전부 여기 둔다.</b> 예전엔 {@code src/test/resources/application.yaml} 에
+     * {@code ddl-auto: validate} 하나가 있었는데, 같은 파일명이라 <b>메인 yaml 을 병합이 아니라 통째로
+     * 가렸다</b> — 테스트에선 {@code spring.kafka.*} 가 아예 안 읽혔다(W3D2 에서 발각). W3D1 이 안 터진 건
+     * 그 값들이 우연히 Boot 기본값과 같아서였고, {@code auto-offset-reset: earliest} 처럼 기본값과 다른
+     * 설정이 생기자 드러났다. 파일을 지우고 이리로 옮겨 가림막을 없앴다.
+     */
     @DynamicPropertySource
     static void testProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.data.redis.host", REDIS::getHost);
         registry.add("spring.data.redis.port", () -> REDIS.getMappedPort(6379));
+        // 엔티티 매핑이 Flyway 스키마와 어긋나면 컨텍스트 로딩부터 실패시킨다(SchemaMappingTest 와 같은 보증).
+        registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
         // 아웃박스 릴레이 Quartz job 이 테스트마다 제멋대로 폴링하면 published_at 단언이 흔들린다.
         // 자동시작을 끄고 테스트가 relay.publishBatch() 를 직접 불러 결정적으로 검증한다.
         registry.add("spring.quartz.auto-startup", () -> "false");
+        // Kafka 리스너도 같은 이유로 끈다(W3D2). 켜두면 refund.requested 소비가 테스트와 <b>동시에</b>
+        // PG 를 부르고 장부를 써서 단언이 흔들리고, 더 나쁘게는 테스트가 끝난 뒤 소비가 도착해
+        // 다음 테스트의 cleanDatabase 와 겹친다. 판단·트랜잭션은 전부 서비스에 있으므로 테스트는
+        // 서비스를 직접 부르고, "리스너가 실제로 배선됐는가"만 별도 케이스에서 컨테이너를 손으로
+        // 켜서 확인한다(RefundSagaTest).
+        registry.add("spring.kafka.listener.auto-startup", () -> "false");
     }
 
     protected static String kafkaBootstrapServers() {
@@ -93,9 +108,13 @@ public abstract class IntegrationTestSupport {
     @BeforeEach
     void cleanDatabase() {
         new TransactionTemplate(cleanupTxManager).executeWithoutResult(s -> {
+            // settlement_pending 은 journal 을 FK 로 참조하므로 journal 보다 먼저 지운다.
+            // 이 테이블은 앱이 아니라 트리거가 채운다(V10) — 테스트가 journal 을 만들면 자동으로
+            // 행이 생기므로, 여기서 안 비우면 다음 테스트의 pendingDates() 에 남의 날짜가 섞인다.
             List<String> tablesChildFirst = List.of(
-                    "outbox", "ledger_entry", "refund", "payment", "order_item",
-                    "orders", "journal", "product", "seller");
+                    "discrepancy_observation", "reconciliation_run",
+                    "settlement", "settlement_pending", "outbox", "ledger_entry", "refund",
+                    "payment", "order_item", "orders", "journal", "product", "seller");
             tablesChildFirst.forEach(t ->
                     em.createNativeQuery("DELETE FROM " + t).executeUpdate());
         });

@@ -19,10 +19,10 @@ import java.util.Map;
  *
  * <h3>{@link RefundOutcome} → HTTP 매핑</h3>
  * <pre>
- *   Accepted                    201  { refundId, amount, refundStatus }
+ *   Accepted                    201  { refundId, amount, refundStatus, remainingRefundable }
  *   Rejected(INVALID_AMOUNT)    400  (실제론 @Positive 가 먼저 끊음 — 아래 분기는 백스톱)
  *   Rejected(NOT_REFUNDABLE)    409  영영 안 됨 — 결제의 현재 상태와 요청이 충돌(OrderController 재고부족=409 와 같은 결)
- *   Rejected(EXCEEDS_REMAINING) 409  잔액 초과 — refunded_amount 라는 현재 자원 상태에 걸린 거절
+ *   Rejected(EXCEEDS_REMAINING) 409  잔액 초과 — reserved_refund_amount 라는 현재 자원 상태에 걸린 거절
  *   Rejected(PAYMENT_UNKNOWN)   503  정보의 부재(W1D1 §3) — "충돌"이 아니라 상류(PG) 진실 미확정. Retry-After 로
  *                                    "잠시 후 다시"를 전달한다. 재시도 성격이 정반대라 위 409 들과 상태로 구분한다.
  * </pre>
@@ -51,11 +51,13 @@ public class RefundController {
         return switch (outcome) {
             case RefundOutcome.Accepted a -> {
                 Refund r = a.refund();
-                // payment 는 서비스에서 refresh 한 관리 인스턴스라 프록시가 아니다 — refundStatus() 안전.
+                // 두 값은 서비스가 자기 tx 안에서 계산해 넘긴다 — 컨트롤러가 리포지토리를 만지지
+                // 않게(그리고 tx 밖 조회가 생기지 않게). 왜 하나가 아니라 둘인지는 Accepted javadoc.
                 yield ResponseEntity.status(HttpStatus.CREATED).body(new RefundResponse(
                         r.getId(),
                         r.getAmount(),
-                        r.getPayment().refundStatus().name()));
+                        a.refundStatus().name(),
+                        a.remainingRefundable()));
             }
             case RefundOutcome.Rejected rej -> switch (rej.reason()) {
                 case INVALID_AMOUNT -> error(HttpStatus.BAD_REQUEST, "INVALID_AMOUNT");
@@ -83,6 +85,21 @@ public class RefundController {
     public record RefundRequest(@Positive long amount) {
     }
 
-    public record RefundResponse(Long refundId, Long amount, String refundStatus) {
+    /**
+     * 접수증이다 — 결과가 아니다(W3D2 부터 환불은 Saga 라 여기선 아직 아무것도 확정되지 않았다).
+     *
+     * <p><b>두 값이 서로 다른 축을 본다</b>(W3D4 결정 3-다). 20,000 결제에 20,000 을 요청한 직후:
+     * <pre>
+     *   refundStatus        = "NOT_REFUNDED"   확정 기준 — PG 를 아직 안 불렀다
+     *   remainingRefundable = 0                예약 기준 — 이미 다 잡혔다
+     * </pre>
+     * 모순처럼 읽히지만 둘 다 참이고, 이 조합이 <b>바로 다음 요청이 왜 409(EXCEEDS_REMAINING)인지</b>를
+     * 응답만 보고 알 수 있게 한다. 라벨 하나만 주면 "환불 없음"을 보고도 거부당한다.
+     *
+     * <p>{@code remainingRefundable} 은 <b>안내지 보증이 아니다</b> — 읽은 뒤 다음 요청 사이에 다른
+     * 환불이 끼어들 수 있다. 정합성은 언제나 {@code reserveRefund} 한 문장이 지킨다(W1D2).
+     */
+    public record RefundResponse(Long refundId, Long amount,
+                                 String refundStatus, long remainingRefundable) {
     }
 }

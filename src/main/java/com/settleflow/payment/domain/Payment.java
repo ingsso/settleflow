@@ -48,8 +48,15 @@ public class Payment {
     @Column(name = "amount", nullable = false)
     private Long amount;
 
-    @Column(name = "refunded_amount", updatable = false)
-    private Long refundedAmount;
+    /**
+     * <b>예약</b>이다 — "환불된 금액"이 아니라 COMPLETED + REQUESTED + UNKNOWN 의 합이다(V9 주석).
+     * W3D2 에서 환불이 Saga 로 갈라지면서 의미가 바뀌었고, W3D4 에 이름을 사실에 맞췄다.
+     *
+     * <p>이 값을 쓰는 건 <b>가드 하나뿐</b>이다({@code PaymentRepository.reserveRefund} 의
+     * {@code + :amount <= amount}). 환불 라벨은 여기서 파생하지 않는다 — {@link #refundStatus(long)}.
+     */
+    @Column(name = "reserved_refund_amount", updatable = false)
+    private Long reservedRefundAmount;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private OffsetDateTime createdAt;
@@ -64,7 +71,7 @@ public class Payment {
         this.amount = amount;
         this.merchantPaymentId = UUID.randomUUID();
         this.status = PaymentStatus.PENDING;
-        this.refundedAmount = 0L;
+        this.reservedRefundAmount = 0L;
     }
 
     public TransitionResult onApproved() {
@@ -91,27 +98,59 @@ public class Payment {
     }
 
     /**
-     * 환불 진행 라벨을 {@code refunded_amount} 에서 파생한다(W2D4). 저장하지 않는 이유는
+     * 환불 진행 라벨(W2D4, 원천 교체 W3D4). 저장하지 않는 이유와 원천이 바뀐 이유는
      * {@link RefundStatus} 참고.
      *
+     * <h3>왜 합계를 인자로 받나</h3>
+     * W2D4 엔 인자가 없었다 — {@code refunded_amount} 가 이 행 안에 있었기 때문이다. W3D4 에 원천이
+     * {@code refund} 테이블의 <b>확정분 합</b>으로 옮겨가면서 이 엔티티 혼자서는 답할 수 없게 됐다.
+     * 그렇다고 메서드를 통째로 서비스로 내리면 <b>아래 정의역 판정이 호출부마다 복제된다</b> —
+     * {@link RefundStatus#of} 는 순수 함수라 {@link PaymentStatus} 를 모른다.
+     * 그래서 <b>규칙은 {@code RefundStatus.of}, 정의역은 여기</b>로 갈랐다. 밖으로 나간 건 계산이 아니라
+     * <i>데이터 출처</i>뿐이다.
+     *
      * <p><b>정의역은 {@code PAID} 인 결제뿐이다.</b> 파생식은 금액 두 개만 보므로, PENDING 결제에
-     * 물으면 {@code refunded_amount == 0} 이라 태연히 "환불 없음"을 돌려준다 — 사실이 아니다.
+     * 물으면 확정 환불액이 0 이라 태연히 "환불 없음"을 돌려준다 — 사실이 아니다.
      * 애초에 받은 돈이 없어 환불이라는 축 자체가 성립하지 않는다. 정의역 밖 호출은
      * <b>프로그래밍 오류</b>이므로 조용한 거짓말 대신 예외로 터뜨린다.
      *
      * <p>대비: 환불 <i>요청</i>이 PENDING 결제로 들어오는 건 예상된 입력이라 예외가 아니라
      * {@link RefundResult#NOT_REFUNDABLE} 로 돌려준다. 조회는 던지고, 명령은 반환한다.
      *
+     * @param completedAmount {@code RefundRepository.sumCompletedAmount} 가 준 <b>확정</b> 환불액 합.
+     *                        예약({@link #reservedRefundAmount})을 넘기면 진행중인 환불이 환불된 것으로
+     *                        세어진다 — W3D2 가 만들고 W3D4 가 닫은 바로 그 버그다.
      * @throws IllegalStateException 결제가 {@code PAID} 가 아닐 때
      */
-    public RefundStatus refundStatus() {
+    public RefundStatus refundStatus(long completedAmount) {
+        requirePaid("환불 상태");
+        return RefundStatus.of(this.amount, completedAmount);
+    }
+
+    /**
+     * 지금 더 환불받을 수 있는 최대 금액. <b>예약 기준</b>이다 — 확정 기준이 아니다.
+     *
+     * <p>{@code PaymentRepository.reserveRefund} 의 {@code + :amount <= amount} 가 실제로 판정하는 값과
+     * 같은 식이라, 여기 나온 수보다 큰 요청은 반드시 거부된다. <b>다만 이건 안내지 보증이 아니다</b> —
+     * 읽은 뒤 UPDATE 사이에 다른 환불이 끼어들 수 있다. 정합성은 언제나 그 한 문장이 지킨다
+     * (W1D2 실측: 조회 후 판단으로 바꾸면 8,000 이 11,000).
+     *
+     * <p>{@link #refundStatus(long)} 과 <b>다른 축</b>이다. 전액 환불을 요청만 해둔 상태면 라벨은
+     * {@code NOT_REFUNDED}(아직 확정 안 됨) 인데 이 값은 0(더는 못 받음) 이다. 모순처럼 보이지만
+     * 둘 다 참이고, 둘을 같이 보여줘야 "왜 409 가 나는지"가 설명된다(W3D4 결정 3-다).
+     *
+     * @throws IllegalStateException 결제가 {@code PAID} 가 아닐 때 — {@code refundStatus} 와 같은 정의역
+     */
+    public long remainingRefundable() {
+        requirePaid("환불 가능액");
+        return this.amount - this.reservedRefundAmount;
+    }
+
+    private void requirePaid(String what) {
         if (this.status != PaymentStatus.PAID) {
             throw new IllegalStateException(
-                    "환불 상태는 PAID 결제에만 정의된다. paymentId=" + this.id + " status=" + this.status);
+                    what + "은 PAID 결제에만 정의된다. paymentId=" + this.id + " status=" + this.status);
         }
-        if (this.refundedAmount == 0L) return RefundStatus.NOT_REFUNDED;
-        if (this.refundedAmount.equals(this.amount)) return RefundStatus.REFUNDED;
-        return RefundStatus.PARTIAL_REFUNDED;
     }
 
     /**

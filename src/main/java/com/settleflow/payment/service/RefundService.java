@@ -1,7 +1,5 @@
 package com.settleflow.payment.service;
 
-import com.settleflow.ledger.domain.Journal;
-import com.settleflow.ledger.service.LedgerService;
 import com.settleflow.outbox.domain.EventType;
 import com.settleflow.outbox.service.OutboxWriter;
 import com.settleflow.payment.domain.Payment;
@@ -19,8 +17,20 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 환불 요청 판정(W2D4). 요청을 받아줄지 결정하고, 받아주면 금액 누적 + {@code refund} 행을 남긴다.
  *
- * <p><b>W2D5 부터 장부까지 같은 트랜잭션에서</b> 움직인다: 금액 누적(UPDATE) + {@code refund} 행
- * INSERT + 역분개 journal INSERT 가 한 덩어리다. 갈라지면 돈·이력·장부가 드리프트한다.
+ * <h3>W3D2 — 여기서 장부가 빠졌다</h3>
+ * W2D5 에선 역분개 journal 까지 이 트랜잭션에 있었다. 요청 = 반영이었기 때문이다. 이제 실제 PG
+ * 환불을 {@link RefundConfirmService} 가 부르므로, <b>여기서는 아직 아무것도 확정되지 않았다</b> —
+ * 장부에 적을 사실이 없다. 선반영해두고 실패 시 보상 분개로 지우는 길도 있었지만, 그건 장부가
+ * 평시에 거짓말하고 나중에 정정하는 걸 정상 경로로 만든다(W1D1 §5 — 정정은 사람의 실수를 위한
+ * 도구다). 안 적으면 지울 일도 없다.
+ *
+ * <p><b>대신 금액 누적은 그대로 남는다.</b> 이건 이제 "환불됨"이 아니라 <b>예약</b>이다 —
+ * {@link PaymentRepository#reserveRefund} 의 조건부 UPDATE 가 과다환불을 막는 유일한 판정이라,
+ * 이것까지 미루면 잔액을 판정할 근거가 아직 없어 동시 환불이 전부 통과한다(W1D2 실측: 8,000 이
+ * 11,000). W1D3 의 재고와 같은 모양 — 주문 시 원자적으로 잡아두고, 결제가 안 되면 되돌린다.
+ *
+ * <p>그래서 이 tx 는 <b>금액 예약 + {@code refund} 행 + {@code refund.requested} 이벤트</b> 한 덩어리다.
+ * 갈라지면 돈·이력·이벤트가 드리프트한다.
  *
  * <h3>가드 분업</h3>
  * <pre>
@@ -28,7 +38,7 @@ import org.springframework.transaction.annotation.Transactional;
  *   2. FAILED 환불         → 앱 (받은 적이 없다)
  *   3. UNKNOWN 환불        → 앱 (정보의 부재 — 별도 사유로 구분)
  *   4. 0원·음수 환불        → 앱 + DB CHECK(chk_refund_amount)
- *   5. 잔액 초과           → SQL 조건부 UPDATE + DB CHECK(chk_payment_refunded_amount)
+ *   5. 잔액 초과           → SQL 조건부 UPDATE + DB CHECK(chk_payment_reserved_refund_amount)
  *   6. 전액환불 후 추가환불 → 5 에 흡수됨 (별도 가드 불필요)
  * </pre>
  *
@@ -38,39 +48,42 @@ import org.springframework.transaction.annotation.Transactional;
  *
  * <p><b>앱 가드가 금액을 안 보는 이유.</b> "잔액 조회 → 충분한지 판단 → UPDATE" 는 읽기와 쓰기
  * 사이의 틈에서 동시 환불이 둘 다 통과한다(W1D2 실측: 8,000 이어야 할 값이 11,000). 그래서 금액
- * 판정은 {@link PaymentRepository#addRefundedAmount} 한 문장에 맡기고, 앱은 손대지 않는다.
+ * 판정은 {@link PaymentRepository#reserveRefund} 한 문장에 맡기고, 앱은 손대지 않는다.
  * 친절한 사전 안내가 필요하면 그건 UX 계층(컨트롤러)의 일이지 정합성 가드가 아니다.
+ *
+ * <p><b>W3D4 에 그 "친절한 사전 안내"가 실제로 생겼다</b> — 접수 응답이
+ * {@code remainingRefundable} 을 같이 준다({@link RefundOutcome.Accepted}). 여전히 가드가 아니다:
+ * 읽은 뒤 다음 UPDATE 사이에 다른 환불이 끼어들 수 있어 <b>안내지 보증이 아니다.</b>
  */
 @Service
 public class RefundService {
 
     private final PaymentRepository paymentRepository;
     private final RefundRepository refundRepository;
-    private final LedgerService ledgerService;
     private final OutboxWriter outboxWriter;
     private final EntityManager em;
 
     public RefundService(PaymentRepository paymentRepository,
                          RefundRepository refundRepository,
-                         LedgerService ledgerService,
                          OutboxWriter outboxWriter,
                          EntityManager em) {
         this.paymentRepository = paymentRepository;
         this.refundRepository = refundRepository;
-        this.ledgerService = ledgerService;
         this.outboxWriter = outboxWriter;
         this.em = em;
     }
 
     /**
-     * 부분·전액 환불 1건을 반영한다.
+     * 부분·전액 환불 1건을 <b>접수</b>한다. 환불이 실제로 일어났다는 뜻이 아니다(W3D2) —
+     * 잔액을 예약하고, 이력을 남기고, PG 를 부를 소비자에게 이벤트를 띄운다.
      *
-     * <p>금액 누적(UPDATE)과 {@code refund} 행 INSERT 가 <b>한 트랜잭션</b>이다 — 갈라지면
-     * {@code payment.refunded_amount} 와 환불 이력이 드리프트한다({@link Refund} 클래스 주석).
+     * <p>셋이 <b>한 트랜잭션</b>이다 — 갈라지면 예약만 잡히고 이벤트가 없어 아무도 PG 를 안 부르거나
+     * (돈이 영원히 묶인다), 이벤트만 나가 예약 없이 환불이 실행된다(과다환불).
      *
-     * @return 성공이면 저장된 {@link Refund} 를 딴 {@link RefundOutcome.Accepted}, 아니면 거부 사유를 담은
-     *         {@link RefundOutcome.Rejected}. 예상되는 입력이므로 예외를 던지지 않는다(존재하지 않는
-     *         결제 id 만 {@link IllegalArgumentException} — 그건 프로그래밍/경로 오류지 환불 판정이 아니다).
+     * @return 접수되면 저장된 {@link Refund}({@code pgStatus=REQUESTED}) 를 딴
+     *         {@link RefundOutcome.Accepted}, 아니면 거부 사유를 담은 {@link RefundOutcome.Rejected}.
+     *         예상되는 입력이므로 예외를 던지지 않는다(존재하지 않는 결제 id 만
+     *         {@link IllegalArgumentException} — 그건 프로그래밍/경로 오류지 환불 판정이 아니다).
      */
     @Transactional
     public RefundOutcome requestRefund(Long paymentId, long amount) {
@@ -89,23 +102,32 @@ public class RefundService {
         }
 
         // --- SQL 가드: 판정과 실행이 한 문장. 영향 행 수가 곧 판정이다 ---
-        if (paymentRepository.addRefundedAmount(paymentId, amount) == 0) {
+        if (paymentRepository.reserveRefund(paymentId, amount) == 0) {
             return new RefundOutcome.Rejected(RefundResult.EXCEEDS_REMAINING);
         }
 
-        // 네이티브 UPDATE 는 영속성 컨텍스트를 모른다 — 새로고침해야 refundStatus() 가 최신을 본다.
+        // 네이티브 UPDATE 는 영속성 컨텍스트를 모른다 — 새로고침해야 remainingRefundable() 이
+        // 방금 잡은 예약을 반영한 값을 본다.
         em.refresh(payment);
 
-        // 역분개(W2D5). 위 UPDATE 가 1행을 갱신했다는 건 "이 환불이 실제로 일어났다"는 판정이고,
-        // 그 직후가 journal 이 붙을 자리다. 결제처럼 멱등 지점에 얹지 않는 이유는 환불엔 멱등이
-        // 없기 때문 — 같은 금액 두 번은 진짜 환불 2건이라 journal 도 2개가 정답이다(위 javadoc).
-        Journal journal = ledgerService.recordRefund(payment, amount);
-        Refund refund = refundRepository.save(new Refund(payment, amount, journal));
+        // 위 UPDATE 가 1행을 갱신했다는 건 "이 환불 요청을 받아준다"는 판정이다(W3D2 부터는
+        // "환불이 일어났다"가 아니다 — 그건 PG 가 정한다). 그 직후가 이력을 남길 자리.
+        // 결제처럼 멱등 지점에 얹지 않는 이유는 환불엔 멱등이 없기 때문 — 같은 금액 두 번은
+        // 진짜 환불 2건이라 refund 행도 2개가 정답이다(위 javadoc).
+        // IDENTITY 라 save() 시점에 INSERT 가 나가고 id 가 채워진다 — 이벤트가 refundId 를 실을 수 있다.
+        Refund refund = refundRepository.save(new Refund(payment, amount));
 
-        // refund.requested 를 같은 tx 에 append(W3D1). 역분개 journal 을 거울처럼 읽은 fat 스냅샷.
-        // 금액 누적·refund·journal·event 가 한 덩어리로 커밋 — 어느 하나만 남는 드리프트가 불가능.
+        // refund.requested 를 같은 tx 에 append. thin 이다 — 아직 장부에 적힌 사실이 없어 비출
+        // 거울이 없다(RefundRequestedEvent javadoc). 셀러별 내역은 refund.completed 가 싣는다.
         outboxWriter.append(payment.getId(), EventType.REFUND_REQUESTED,
-                RefundRequestedEvent.from(payment, refund, journal));
-        return new RefundOutcome.Accepted(refund);
+                RefundRequestedEvent.from(refund));
+
+        // 201 바디에 실을 두 축(W3D4 결정 3-다). 라벨은 <확정> 환불액에서 파생하므로 방금 접수한
+        // 이 건은 안 들어간다 — 그래서 전액 환불을 요청해도 여기선 NOT_REFUNDED 다. 그게 사실이다
+        // (PG 를 아직 안 불렀다). 대신 remainingRefundable 이 0 이라 "더는 못 받는다"가 같이 나가고,
+        // 그 둘이 있어야 다음 요청의 409 가 응답만 보고 설명된다.
+        long completedAmount = refundRepository.sumCompletedAmount(paymentId);
+        return new RefundOutcome.Accepted(
+                refund, payment.refundStatus(completedAmount), payment.remainingRefundable());
     }
 }
