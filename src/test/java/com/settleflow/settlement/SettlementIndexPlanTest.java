@@ -4,6 +4,7 @@ import com.settleflow.support.IntegrationTestSupport;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -33,7 +34,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <h3>왜 데이터를 많이 심는가</h3>
  * 몇 행짜리 테이블에는 플래너가 <b>항상 {@code Seq Scan}</b> 을 고른다 — 인덱스를 타는 게 더
  * 비싸기 때문이다. 그 상태의 `EXPLAIN` 은 인덱스에 대해 아무것도 말해주지 않는다.
- * 그래서 {@link #DAYS}×{@link #SELLERS} 행을 심고 {@code ANALYZE} 로 통계를 갱신한 뒤에 잰다.
+ * 그래서 {@link #DAYS}×{@link #SELLERS} 행을 심고 {@code VACUUM (ANALYZE)} 로 통계를 갱신한 뒤에
+ * 잰다 — {@code VACUUM} 이 왜 같이 필요한지는 {@link #seed()} 에 적어뒀다.
  *
  * <p><b>이 클래스는 정확성을 검증하지 않는다.</b> 플랜은 데이터 분포·PG 버전·설정에 따라 바뀔 수
  * 있으므로 단언은 최소로 두고(인덱스 이름과 {@code Sort} 유무), 판단 근거는 출력된 플랜 전문에 있다.
@@ -46,6 +48,8 @@ class SettlementIndexPlanTest extends IntegrationTestSupport {
 
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
+    /** {@code VACUUM} 전용 — 트랜잭션 밖에서 실행해야 하므로 {@code em} 이 아니라 이쪽을 쓴다({@link #seed()}). */
+    @Autowired JdbcTemplate jdbcTemplate;
 
     @Test
     void 인덱스_순서_주장을_EXPLAIN_으로_실측한다() {
@@ -149,6 +153,22 @@ class SettlementIndexPlanTest extends IntegrationTestSupport {
      *
      * <p>{@code ANALYZE} 를 빼먹으면 플래너가 빈 테이블 통계를 들고 판단해서 이 실측이 통째로
      * 무의미해진다 — 심는 것보다 이쪽이 중요하다.
+     *
+     * <p><b>그런데 {@code ANALYZE} 만으로는 절반이었다(2026-08-03 발각).</b> 부모의
+     * {@code cleanDatabase} 는 {@code DELETE} 라 죽은 튜플이 블록에 남고, {@code ANALYZE} 는 그
+     * 부푼 블록 위에서 통계를 잡는다. 그러면 살아있는 40행이 80블록에 흩어진 것으로 보여
+     * {@code Index Scan} 의 랜덤 접근 비용이 올라가고, 플래너가 {@code Bitmap Heap Scan} 으로
+     * 갈아탄다 — <b>비트맵은 인덱스 순서를 보존하지 않으므로 {@code ORDER BY} 에 {@code Sort} 가
+     * 붙는다.</b> 그게 이 클래스가 노리는 바로 그 단언을 깼다.
+     *
+     * <p>증상은 <b>앞에 무엇이 돌았느냐</b>에 달려 있었다 — 클래스 단독 실행은 초록, 전체 스위트에서만
+     * 빨강. 즉 이 테스트는 자기 데이터가 아니라 <b>남이 남긴 잔해</b>를 재고 있었다.
+     * {@code VACUUM} 으로 잔해를 먼저 걷어낸 뒤 통계를 잡는다.
+     *
+     * <p><b>트랜잭션 밖에서 돌려야 한다</b> — {@code VACUUM} 은 트랜잭션 블록 안에서 실행할 수 없다.
+     * 그래서 삽입만 {@code TransactionTemplate} 으로 묶고, {@code VACUUM (ANALYZE)} 는 커밋 뒤에
+     * {@code JdbcTemplate}(autocommit 커넥션)으로 따로 부른다. {@code ANALYZE} 를 여기 합쳤으므로
+     * 트랜잭션 안의 {@code ANALYZE} 는 없앴다 — 두 번 할 이유가 없다.
      */
     private void seed() {
         new TransactionTemplate(txManager).executeWithoutResult(s -> {
@@ -164,9 +184,10 @@ class SettlementIndexPlanTest extends IntegrationTestSupport {
                            (random() * 1000000)::bigint
                       FROM seller s, generate_series(0, :days - 1) d
                     """).setParameter("days", DAYS).executeUpdate();
-
-            em.createNativeQuery("ANALYZE settlement").executeUpdate();
         });
+
+        // 삽입 트랜잭션이 커밋된 뒤에 — 그래야 방금 넣은 행이 통계에 잡힌다.
+        jdbcTemplate.execute("VACUUM (ANALYZE) settlement");
     }
 
     private String explain(String sql) {
