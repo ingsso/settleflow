@@ -16,3 +16,38 @@ spring:
       # 소비자가 붙기 전에 발행된 이벤트도 처리해야 한다 — 아웃박스는 유실을 막으려고 존재하는데
       # 소비자가 latest 로 시작하면 그 사이 이벤트를 아무도 안 집는다.
       auto-offset-reset: earliest
+
+# PG 장애 격리(W4D1). 회로를 승인/환불 둘로 나눈 이유는 ResilientPgClient javadoc 참조 —
+# 실패의 뜻이 다르다(승인은 빚이 안 생기고, 환불은 이미 진 빚이다).
+#
+# 무엇이 실패로 세어지나: 예외만. PG 거절은 반환값이라 회로를 안 흔든다 — 거절은 PG 가 멀쩡히
+# 답한 것이고 격리할 장애가 아니다. 실질적으로 회로를 여는 건 PgTimeoutException 이다.
+resilience4j:
+  circuitbreaker:
+    instances:
+      pg-approve:
+        # COUNT_BASED: 최근 N건 중 실패율로 판단. 시간 기준(TIME_BASED)이 아닌 건 트래픽이
+        # 없는 시간대에 오래된 실패가 창에 남아 판단을 흐리는 걸 피하려는 것.
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        # 표본이 적을 때 성급히 열지 않는다 — 2건 중 1건 실패로 50% 가 되면 안 된다.
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        # 열린 뒤 이만큼은 아무것도 안 보낸다. 짧으면 죽은 PG 를 계속 두드리고,
+        # 길면 회복을 늦게 알아챈다.
+        wait-duration-in-open-state: 30s
+        # HALF_OPEN 에서 흘려보낼 시험 호출 수. 이게 실패하면 다시 OPEN.
+        permitted-number-of-calls-in-half-open-state: 3
+        # 자동 전이는 끈다(기본값) — 백그라운드 스케줄러 없이, 대기 시간이 지난 뒤 들어온
+        # 다음 호출이 HALF_OPEN 을 연다. 트래픽이 없으면 열어볼 이유도 없다.
+        automatic-transition-from-open-to-half-open-enabled: false
+      pg-refund:
+        # 승인과 같은 값으로 시작한다. 다른 값을 줄 근거가 아직 실측에 없다 —
+        # 나누는 것 자체가 오늘의 판단이고, 값을 가르는 건 근거가 생기면 그때.
+        sliding-window-type: COUNT_BASED
+        sliding-window-size: 20
+        minimum-number-of-calls: 10
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 30s
+        permitted-number-of-calls-in-half-open-state: 3
+        automatic-transition-from-open-to-half-open-enabled: false

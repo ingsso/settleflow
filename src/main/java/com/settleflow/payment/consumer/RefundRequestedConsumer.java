@@ -31,6 +31,17 @@ import org.springframework.stereotype.Component;
  *
  * <p><b>DLT·재시도 정책은 아직 없다</b>(W3D2 이월). 지금은 장애 시 무한 재시도라, 영구적으로
  * 실패하는 이벤트 하나가 파티션을 막을 수 있다.
+ *
+ * <h3>PG 차단기 개방 = 의도된 재배달(W4D1)</h3>
+ * {@link RefundConfirmService#confirm} 이 {@code CallNotPermittedException} 을 내보내면 여기서
+ * <b>잡지 않는다</b> — 잡으면 오프셋이 밀려 환불이 조용히 사라진다. 예외가 나가야 오프셋이
+ * 안 밀리고 같은 이벤트가 다시 온다. 위 [POISON]·[ORPHAN] 과 갈리는 지점은 <b>재시도해서
+ * 달라지는가</b> 다: 저 둘은 몇 번을 다시 해도 같은 결과라 넘기지만, 차단기 개방은
+ * <b>시한부</b>라 기다리면 풀린다.
+ *
+ * <p><b>알고 남기는 구멍</b>: 백오프가 없어 회로가 열려 있는 동안 재배달이 <b>뜨겁게 돈다</b>.
+ * 위에 적어둔 "DLT·재시도 정책 없음"이 W4D1 에서 가정이 아니라 실제 조건이 됐다 —
+ * {@code DefaultErrorHandler} + 지수 백오프는 W4 중에 갚는다.
  */
 @Component
 public class RefundRequestedConsumer {
