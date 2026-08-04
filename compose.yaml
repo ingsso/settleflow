@@ -38,3 +38,33 @@ services:
       interval: 10s
       timeout: 10s
       retries: 10
+
+  # W4D2 관측. 포트를 고정하는 건 Kafka 와 이유가 다르다 — Kafka 는 브로커가 자기 주소를
+  # 광고해야 해서였고, 이 둘은 <b>사람이 브라우저로 연다</b>. 랜덤 포트면 매번 찾아야 한다.
+  prometheus:
+    image: 'prom/prometheus:v3.1.0'
+    ports:
+      - '9090:9090'
+    volumes:
+      - './docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro'
+    # 앱은 호스트에서 bootRun 으로 돈다 — 컨테이너 안에서 호스트를 부를 이름이 필요하다.
+    # Docker Desktop 은 이 이름을 기본 제공하지만 Linux 는 안 그래서 명시한다.
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+  grafana:
+    image: 'grafana/grafana:11.5.1'
+    ports:
+      - '3000:3000'
+    environment:
+      # 로컬 전용. 대시보드 스크린샷이 산출물이라 로그인 벽을 없앤다 — 인증이 필요한
+      # 환경에 올릴 물건이 아니다.
+      - 'GF_AUTH_ANONYMOUS_ENABLED=true'
+      - 'GF_AUTH_ANONYMOUS_ORG_ROLE=Admin'
+      - 'GF_AUTH_DISABLE_LOGIN_FORM=true'
+    volumes:
+      - './docker/grafana/provisioning:/etc/grafana/provisioning:ro'
+      # 대시보드 JSON 본체. provisioning/dashboards/dashboards.yml 이 이 경로를 읽는다.
+      - './docker/grafana/dashboards:/etc/grafana/dashboards:ro'
+    depends_on:
+      - prometheus

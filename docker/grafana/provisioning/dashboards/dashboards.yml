@@ -1,0 +1,19 @@
+# 대시보드 자동 프로비저닝(W4D2).
+# 손으로 만든 대시보드는 컨테이너를 지우면 같이 사라진다 — 계획서 최종 산출물에
+# "Grafana 대시보드 스크린샷"이 있으므로 파일로 남겨 재현 가능하게 둔다.
+
+apiVersion: 1
+
+providers:
+  - name: 'settleflow'
+    orgId: 1
+    folder: ''
+    type: file
+    disableDeletion: false
+    # UI 에서 고친 걸 파일이 도로 덮어쓰지 않게 둔다. 다만 컨테이너를 다시 만들면
+    # UI 수정분은 사라지므로, 남길 변경은 JSON 파일에 반영해야 한다.
+    allowUiUpdates: true
+    updateIntervalSeconds: 10
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,9 +1,11 @@
 package com.settleflow.settlement.service;
 
+import com.settleflow.observability.SettlementMetrics;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.List;
 
@@ -36,8 +38,15 @@ public class SettlementRunner {
 
     private final SettlementService settlementService;
 
-    public SettlementRunner(SettlementService settlementService) {
+    /**
+     * 소요시간은 <b>DB 에 안 남는다</b>(W4D2). 불일치 건수·마지막 성공 시각과 달리 재구성할
+     * 원본이 없어서, 여기서 재는 것 말고는 알 방법이 없다.
+     */
+    private final SettlementMetrics metrics;
+
+    public SettlementRunner(SettlementService settlementService, SettlementMetrics metrics) {
         this.settlementService = settlementService;
+        this.metrics = metrics;
     }
 
     /**
@@ -52,16 +61,38 @@ public class SettlementRunner {
      *         최근 창만 보면 아주 오래된 날짜가 재정산돼도 아무도 대사하지 않기 때문이다.
      */
     public List<LocalDate> runPending() {
+        long batchStart = System.nanoTime();
         List<LocalDate> dates = settlementService.pendingDates();
         if (dates.isEmpty()) {
             log.info("정산 배치 — 밀린 날짜 없음");
+            // 0 건도 기록한다 — 밀린 게 없는 건 정상 상태이고, 그때도 "배치가 돌긴 했다"가
+            // 남아야 A ÷ N 의 N=0 과 "안 돌았다"가 갈린다.
+            metrics.recordBatch(elapsedSince(batchStart), 0);
             return List.of();
         }
 
         log.info("정산 배치 — 밀린 날짜 {}건 {}", dates.size(), dates);
         for (LocalDate date : dates) {
+            long dateStart = System.nanoTime();
             settlementService.settle(date);
+            metrics.recordDate(elapsedSince(dateStart));
         }
+        metrics.recordBatch(elapsedSince(batchStart), dates.size());
         return dates;
+    }
+
+    /**
+     * 계측을 {@code try/finally} 에 안 넣은 게 판단이다 — <b>실패한 배치는 소요시간에 안 남는다.</b>
+     *
+     * <p>넣으면 3시간 돌다 죽은 배치의 시간이 성공한 배치들과 같은 시계열에 섞여, "정산이 느려졌다"와
+     * "정산이 실패했다"가 한 숫자가 된다. 실패는 <b>다른 지표가 잡는다</b>: 대사가 못 돌아
+     * {@code last_success_timestamp} 가 안 움직이고, {@code time() - metric > 26h} 가 뜬다.
+     * 두 지표가 각자 한 가지씩 맡는 쪽을 골랐다.
+     *
+     * <p>{@code System.nanoTime()} 은 벽시계가 아니라 <b>단조 시계</b>다. NTP 보정이나 서머타임이
+     * 경과 시간을 음수로 만들지 않는다 — {@code OffsetDateTime.now()} 차이로 재면 그 자리가 열린다.
+     */
+    private static Duration elapsedSince(long startNanos) {
+        return Duration.ofNanos(System.nanoTime() - startNanos);
     }
 }

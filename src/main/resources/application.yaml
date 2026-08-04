@@ -51,3 +51,39 @@ resilience4j:
         wait-duration-in-open-state: 30s
         permitted-number-of-calls-in-half-open-state: 3
         automatic-transition-from-open-to-half-open-enabled: false
+
+# 관측(W4D2). actuator 와 micrometer-registry-prometheus 는 W1 스캐폴딩부터 클래스패스에
+# 있었지만 노출 설정이 한 줄도 없어 /actuator/prometheus 가 닫혀 있었다 — W4D1 스모크가
+# "증명 안 한 것: 메트릭 노출(W4D2 소관)"으로 남긴 자리다.
+#
+# ★ 왜 Prometheus 인가 — DB 로도 되는 것과 안 되는 것을 갈라야 한다.
+# 불일치 건수는 이미 reconciliation_run 에 append-only 로 쌓이고, Grafana 는 Postgres 를
+# 데이터소스로 직접 붙일 수 있어 SQL 한 줄로 그려진다. 알림도 마찬가지다. 그래서 "실시간"은
+# 근거가 아니다 — 이 배치는 하루 1회라 실시간이랄 게 없다. 실제 근거는 둘:
+#   ① 저장 경로를 감시 대상에서 뗀다. Postgres 가 죽으면 SQL 알림도 같이 죽는다.
+#      W3D4(금액 계산의 독립) · W3D5 ③(볼 목록의 독립) 에 이어 세 번째 반복이고,
+#      이번에 독립시키는 건 "어디에 남기나" 다.
+#   ② DB 행은 커밋돼야 생긴다 — 진행 중인 배치와 안 돈 배치를 DB 는 구분 못 한다.
+#      소요시간과 회로 상태는 DB 에 아예 안 남는다.
+#
+# ⚠️ 정직한 한계: 이 독립은 완전하지 않다. Prometheus 를 같은 compose.yaml 에 두면
+# `docker compose down` 한 번에 같이 죽는다. 실제로 얻는 건 "DB 와 다른 저장 경로"까지지
+# "독립된 관측"이 아니다 — 없는 독립을 있다고 쓰면 W3D3 §8 의 함정이다.
+management:
+  endpoints:
+    web:
+      exposure:
+        # prometheus 는 기본 노출 목록에 없다 — 안 적으면 404 다(에러가 아니라 그냥 없음).
+        include: health,info,prometheus
+  endpoint:
+    health:
+      # 로컬 전용. 인증이 붙으면 이 값을 되돌린다.
+      show-details: always
+  health:
+    # 회로 상태를 health 에도 싣는다. 켜야 나온다 — resilience4j 는 기본이 false 다.
+    circuitbreakers:
+      enabled: true
+  prometheus:
+    metrics:
+      export:
+        enabled: true
