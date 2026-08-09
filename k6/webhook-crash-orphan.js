@@ -115,5 +115,6 @@ export function teardown() {
   console.log('');
   console.log('=== 고아 키 검증 (앱이 죽어 있으므로 DB·Redis 를 직접 본다) ===');
   console.log('  bash k6/verify.sh orphan');
-  console.log('  고아 = webhook:dedup:k6-orphan-<mpid> 키가 있는데 그 payment 가 PAID 가 아님');
+  console.log('  고아 = webhook:dedup:k6-orphan-<mpid> 키가 있는데 그 payment 가 아직 UNKNOWN');
+  console.log('  (FAILED 는 고아가 아니다 — 회로 개방·PG 거절은 정당한 종착지다)');
 }

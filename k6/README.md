@@ -42,7 +42,7 @@
 
 ```
 Redis  webhook:dedup:k6-orphan-<mpid>   →  mpid 를 잘라낸다
-DB     payment(merchant_payment_id).status 가 PAID 가 아니면  →  고아
+DB     payment(merchant_payment_id).status 가 아직 UNKNOWN 이면  →  고아
 ```
 
 **이게 프로덕션 동작을 안 바꾼다.** `eventId` 는 앱에게 **불투명한 문자열**이고 Redis 키로만
@@ -113,6 +113,37 @@ kill 때문이라고 말할 수 있다.
 > ("설정을 썼다 ≠ 동작한다")이고, 오늘은 회로 상태를 **행동으로**(승인 주문이 PAID 가 되는지)
 > 확인해 우회했다. → 이월.
 
+### ★★ 그런데 그 수리는 절반만 들었다 — 시나리오 사이에 앱을 재기동할 것 (W4D4)
+
+30% 혼합은 **정상상태**를 계산한 것이었다. `sliding-window-size: 20` 에서 `3/10 → 6/20 = 30%`
+는 맞지만, **첫 판정은 `minimum-number-of-calls: 10` 에서 먼저 일어난다** — 표본이 가장 작은
+자리다. W4D4 에서 `RATE=200` 탐침이 회로를 열었다:
+
+```
+[실측 2026-08-09] payment FAILED +2,993 / PAID +10
+                  "차단기 개방" 로그 2,993건 (FAILED 수와 일치)
+                  buffered_calls 실패 6 / 성공 4  →  failure_rate 60.0   (설계는 30%)
+```
+
+**회로 창은 시나리오가 아니라 앱 생애의 상태다.** 그 앞에 시나리오 ①을 2회 돌렸고, ①의
+`setup` 은 10,222원 주문이라 **PG 타임아웃 2건이 이미 창에 앉아 있었다.** 거기에 완료 순서
+뒤섞임(`iterationInTest` 순서 ≠ PG 도달 순서)이 겹쳐 첫 10건 창이 임계를 넘었다.
+
+**앱을 재기동해 창을 비우고 같은 탐침을 다시 돌리면 안 열린다:**
+
+```
+[실측 2026-08-09] 회로 CLOSED 유지, buffered 실패 4 / 성공 16 → 20.0, FAILED +0
+```
+
+> **규약: 부하 시나리오는 앱 재기동으로 격리한다.** ①과 ②를 같은 앱 생애에서 이어 돌리면
+> 앞 시나리오의 PG 실패가 뒤 시나리오의 회로를 연다. 그리고 **실행 전에 회로 상태를 눈으로
+> 확인한다** — `curl -s :8080/actuator/prometheus | grep circuitbreaker_state`.
+> `/actuator/health` 로는 안 보인다(위 곁가지).
+
+같은 실험이 하나 더 뒤집었다: **회로가 열린 채 잰 운영점은 값이 아니다.** 회로가 열려 주문이
+PG 를 안 거치면 경로가 싸져서 지연이 404ms 로 나오는데, 회로를 닫고 재면 같은 부하가
+**4.18s**(달성 91 it/s)다. 운영점을 정할 때 회로 상태를 같이 안 보면 4배 틀린다.
+
 ## 실행
 
 ```bash
@@ -129,7 +160,11 @@ bash k6/verify.sh baseline              # ← 먼저. journal 증가분을 재�
 k6 run k6/webhook-duplicate-burst.js
 bash k6/verify.sh duplicate <출력에 찍힌 mpid>
 
-# 3) 시나리오 ② 결함 주입
+# 3) ★ 시나리오를 바꾸기 전에 앱을 재기동한다 (회로 창 격리 — 위 W4D4 절 참조)
+#    재기동 후 회로가 CLOSED 인지 눈으로 확인할 것
+curl -s localhost:8080/actuator/prometheus | grep circuitbreaker_state
+
+# 4) 시나리오 ② 결함 주입
 bash k6/verify.sh reset-orphan          # 이전 회차의 k6-orphan 키 정리
 k6 run k6/webhook-crash-orphan.js       # 도중에 앱을 강제 종료할 것 (아래)
 bash k6/verify.sh orphan
@@ -146,15 +181,53 @@ Stop-Process -Id <bootRun JVM PID> -Force
 (`redis.delete`)이 정상적으로 돌기 때문이다. Spring Boot 기본값은 `server.shutdown=immediate`
 라 SIGTERM 으로도 열리지만, 이 실험은 그 설정에 의존하지 않도록 **SIGKILL** 을 쓴다.
 
-> 여기서 파생되는 질문 하나: **`server.shutdown=graceful` 을 켜면 이 구멍이 얼마나 좁아지는가.**
-> D4 에서 같은 시나리오를 graceful 로 한 번 더 돌리면 대조군이 된다. (미실행 — D4 판단)
+### 고아 수는 혼자 두면 값이 아니다 — in-flight 와 나란히 놓는다 (W4D4)
+
+rate 로 조절되는 수를 그냥 보고하면 아무 말도 안 한 것이다. **종료 직전의 활성 요청 수**를
+같이 재야 설명되는 수가 된다. 활성 요청은 `http_server_requests_active_seconds_count`
+(LongTaskTimer)를 200ms 간격으로 표집해 **종료 직전 표본**을 쓴다.
+
+```
+[실측 2026-08-09]  종료 방식        활성 POST   고아(UNKNOWN)
+  kill A  RATE=50   taskkill /F          3            0
+  kill B  RATE=100  taskkill /F         99           23
+  대조군  RATE=100  graceful shutdown  175            0
+```
+
+셋 다 종료 시점 회로 **CLOSED · 창 6/14(30%) · FAILED 0** 이라, 23은 kill 때문이라고 말할 수
+있다. `webhook_sent − 키 개수`(B 10건 / 대조군 59건)는 **SETNX 에 닿기 전에 죽은 요청이라
+고아가 아니다** — 키가 없으니 재전송이 정상 처리된다.
+
+⚠️ 활성 카운터에는 **uri 태그가 안 붙는다**(완료 후에 붙는다). `/orders` 와 `/webhooks/pg` 가
+섞인 합계이므로, "웹훅 in-flight 의 몇 %가 취약 구간이었나"는 **절반 가정이 든 추정**이다.
+
+### graceful 대조군 — 예고가 닫혔다 (W4D4)
+
+**`server.shutdown=graceful` 이면 고아가 0 이다.** 그것도 in-flight 가 kill B 보다 **더 많은**
+순간(175 vs 99)에 0 이라, 대조가 약해지는 게 아니라 강해지는 방향이다. 종료 후 들어온 59건은
+커넥터가 먼저 닫혀 SETNX 에 닿지 못했다 — **안전한 쪽으로 닫힌다.**
+
+⚠️ Windows 에서는 `taskkill /F`(=`TerminateProcess`) 가 SIGKILL 등가라 훅이 안 돌고, `/F` 를
+빼면 `WM_CLOSE` 인데 `bootRun` 의 java 는 콘솔 없는 자식이라 전달이 보장되지 않는다. 그래서
+대조군은 `POST /actuator/shutdown` 으로 종료시켰다. 그 엔드포인트 노출과 `server.shutdown`
+설정은 **실험 후 되돌렸다** — 재는 대상(회로·프로덕션 동작)은 안 바꾸고 **도구만 붙였다 뗀다**
+는 기준이다(W4D1 이 회로를 데코레이터로 뺀 것과 같은 계열).
+
+> **아직 안 정한 것**: graceful 을 실제로 켤 것인가. 구멍이 닫히는 건 실측됐지만 **대가**
+> (종료 지연·배포 시간)는 안 쟀다. → 이월.
 
 ## 이 수치가 뜻하는 것 / 뜻하지 않는 것
 
 - 고아 키 수는 **kill 순간의 in-flight 요청 수에 비례**한다. rate 를 올리면 커진다.
   그러므로 이 숫자는 *"이 시스템의 고유한 값"* 이 아니라 **"이만큼의 동시성에서 이만큼 샌다"** 이다.
+  (두 점 3→0 / 99→23 을 실측했다. **두 점으로 비례를 단정하진 않는다.**)
 - 시나리오 ①은 **완전 동시가 아니다.** `PaymentFlowTest` 는 `CyclicBarrier` 로 20개를 진짜
   동시에 발사하지만, k6 에는 배리어가 없어 "1,000개를 최대한 빨리"에 가깝다.
   **둘은 다른 성질의 검증**이다 — 테스트는 좁은 창의 경합을, k6 는 규모를 본다.
+- ①-b 의 **≈6,100 req/s 는 관문의 거절 경로 처리율**이다. 결제 처리량이 아니다 — 실제 전이를
+  밟는 전체 경로(주문+웹훅)의 용량은 **약 90 it/s** 였다.
 - 부하는 로컬 단일 머신이다. 클라이언트·서버·DB·Redis 가 CPU 를 나눠 쓰므로
   **처리량 수치는 서버 용량이 아니라 이 노트북의 값**이다.
+- **포화 구간에서는 관측 자체가 굶는다.** `/actuator/prometheus` 폴링이 1초 타임아웃으로
+  12표본 연속 실패했다(W4D4). 재려는 값이 가장 큰 곳에서 계기가 눈을 감으므로, 폴러
+  타임아웃을 넉넉히(5초) 두고 **표본 결손을 결과와 함께 기록**할 것.
