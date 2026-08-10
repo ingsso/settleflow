@@ -105,8 +105,9 @@ class RefundSagaRetryTest extends IntegrationTestSupport {
 
         double retryTotal;
         try {
-            // 대역이 성공을 반환할 때까지 = 재시도가 FAIL_TIMES 번을 넘어설 때까지
-            awaitAttempts(FAIL_TIMES, Duration.ofSeconds(30));
+            // 대역이 성공을 반환할 때까지 = 재시도가 FAIL_TIMES 번을 넘어설 때까지.
+            // ★ 도달 못 해도 던지지 않는다 — 아래 단언이 실제 횟수를 보고 판정해야 한다.
+            awaitAtMost(() -> attempts.get() >= FAIL_TIMES, Duration.ofSeconds(30));
             retryTotal = meterRegistry.get("settleflow.refund.saga.retry").counter().count();
         } finally {
             // 다음 테스트의 cleanDatabase 와 겹치지 않게 반드시 끈다.
@@ -139,7 +140,8 @@ class RefundSagaRetryTest extends IntegrationTestSupport {
                 .isPositive();
 
         // 그리고 해소되면 내려간다 — Gauge 로 고른 근거가 이것이다(W4D2 기준).
-        awaitBlockedCleared(Duration.ofSeconds(10));
+        // 성공 통보는 RecordInterceptor 를 거쳐 비동기로 오므로 상태를 기다린다.
+        awaitAtMost(() -> retryMetrics.blockedPartitions() == 0, Duration.ofSeconds(10));
         assertThat(retryMetrics.blockedPartitions()).isZero();
         assertThat(retryMetrics.oldestBlockedSeconds()).isZero();
     }
@@ -158,25 +160,24 @@ class RefundSagaRetryTest extends IntegrationTestSupport {
                 .writeValueAsString(new RefundRequestedEvent(1L, 1L, 5_000L, OffsetDateTime.now()));
     }
 
-    private void awaitAttempts(int target, Duration timeout) throws Exception {
+    /**
+     * 조건이 되면 즉시 반환하고, <b>안 되면 타임아웃 뒤 조용히 반환한다.</b>
+     *
+     * <p><b>여기서 던지면 안 된다</b> — 던지는 순간 그 뒤의 {@code [실측]} 출력과 단언이
+     * 실행되지 않아 <b>실제 수치가 사라진다.</b> 그러면 실패 메시지가
+     * <i>"목표에 도달하지 않았다"</i> 하나로 뭉개져서, <b>배달이 10회에서 멈춴 것</b>(= 우리
+     * 핸들러가 안 꽂힘)과 <b>리스너가 아예 안 뜬 것</b>과 <b>페이로드가 걸러진 것</b>이
+     * 구별되지 않는다.
+     *
+     * <p>W4D5 음성대조군 A 의 1차 시도가 정확히 그렇게 무효가 됐다 — red 는 났지만
+     * <i>"정확히 10"</i> 이라는 증거를 못 얻었다. W3D4 의 규약(<i>클래스가 겨누는 축의 단언이
+     * 먼저</i>)이 헬퍼 때문에 깨진 자리이고, W3D5 의 <i>"red 를 낼 능력이 없는 필터"</i> 와
+     * 같은 계열이다. <b>기다림은 대기이고 판정은 단언이 한다.</b>
+     */
+    private void awaitAtMost(java.util.function.BooleanSupplier condition, Duration timeout)
+            throws Exception {
         long deadline = System.currentTimeMillis() + timeout.toMillis();
-        while (System.currentTimeMillis() < deadline) {
-            if (attemptsReached(target)) return;
-            Thread.sleep(50);
-        }
-        throw new AssertionError("시도 횟수가 " + target + " 에 도달하지 않았다");
-    }
-
-    private boolean attemptsReached(int target) {
-        return org.mockito.Mockito.mockingDetails(refundConfirmService)
-                .getInvocations().size() >= target;
-    }
-
-    /** 성공 통보는 RecordInterceptor 를 거쳐 비동기로 온다 — 상태를 기다린다. */
-    private void awaitBlockedCleared(Duration timeout) throws Exception {
-        long deadline = System.currentTimeMillis() + timeout.toMillis();
-        while (System.currentTimeMillis() < deadline) {
-            if (retryMetrics.blockedPartitions() == 0) return;
+        while (System.currentTimeMillis() < deadline && !condition.getAsBoolean()) {
             Thread.sleep(50);
         }
     }
