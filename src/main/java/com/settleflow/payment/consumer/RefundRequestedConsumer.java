@@ -29,8 +29,26 @@ import org.springframework.stereotype.Component;
  * (던지면 무한 재배달이 된다). 재배달되는 건 진짜 장애(DB 다운 등)뿐이고, 그때 중복 처리는
  * {@code confirm()} 의 두 겹 멱등이 흡수한다.
  *
- * <p><b>DLT·재시도 정책은 아직 없다</b>(W3D2 이월). 지금은 장애 시 무한 재시도라, 영구적으로
- * 실패하는 이벤트 하나가 파티션을 막을 수 있다.
+ * <p><b>재시도 정책은 {@link RefundSagaErrorHandlingConfig} 에 있다</b>(W4D5, W3D2 이월 청산).
+ * 상한 없는 지수 백오프이고, DLT 는 만들지 않았다 — 근거는 그 javadoc.
+ *
+ * <p>⚠️ <b>이 자리에 W4D5 까지 틀린 설명이 적혀 있었다</b>: <i>"지금은 장애 시 무한 재시도라,
+ * 영구적으로 실패하는 이벤트 하나가 파티션을 막을 수 있다"</i>. 에러 핸들러 빈이 없어 Spring Kafka
+ * 기본값({@code FixedBackOff(0ms, 9)} + 건너뛰는 recoverer)이 돌고 있었으므로 실제로는
+ * <b>무한도 아니고 막히지도 않았다 — 10번 즉시 재시도 후 오프셋을 밀어 환불을 버렸다.</b>
+ * 검증 없이 적은 단정이 두 세션 동안 남아 있었고, 그 위에 W4D1 이 재배달 설계를 얹었다.
+ *
+ * <h3>PG 차단기 개방 = 의도된 재배달(W4D1)</h3>
+ * {@link RefundConfirmService#confirm} 이 {@code CallNotPermittedException} 을 내보내면 여기서
+ * <b>잡지 않는다</b> — 잡으면 오프셋이 밀려 환불이 조용히 사라진다. 예외가 나가야 오프셋이
+ * 안 밀리고 같은 이벤트가 다시 온다. 위 [POISON]·[ORPHAN] 과 갈리는 지점은 <b>재시도해서
+ * 달라지는가</b> 다: 저 둘은 몇 번을 다시 해도 같은 결과라 넘기지만, 차단기 개방은
+ * <b>시한부</b>라 기다리면 풀린다.
+ *
+ * <p><b>W4D5 에 갚았다.</b> 그리고 갚으면서 알게 된 건 구멍이 "뜨겁게 돈다"가 아니었다는 것이다 —
+ * 기본 재시도가 간격 0ms 로 10번이라 <b>회로의 30초 창을 못 넘고 그대로 유실</b>됐다. 뜨거운 게
+ * 문제가 아니라 <b>식기 전에 포기하는 게</b> 문제였다. 지금은 상한 없는 지수 백오프라 회로가
+ * 풀릴 때까지 기다린다({@link RefundSagaErrorHandlingConfig}).
  */
 @Component
 public class RefundRequestedConsumer {

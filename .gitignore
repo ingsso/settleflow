@@ -35,3 +35,5 @@ out/
 
 ### VS Code ###
 .vscode/
+# k6 실행 기준선 — 실행마다 달라지는 생성물
+k6/.baseline

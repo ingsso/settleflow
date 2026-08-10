@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Query;
 
 import java.time.LocalDate;
+import java.time.OffsetDateTime;
 import java.util.List;
 
 public interface ReconciliationRunRepository extends JpaRepository<ReconciliationRun, Long> {
@@ -29,6 +30,47 @@ public interface ReconciliationRunRepository extends JpaRepository<Reconciliatio
              ORDER BY r.settlementDate
             """)
     List<LocalDate> findUnresolvedDates();
+
+    /**
+     * <b>지금 미해소인 불일치의 총 건수</b>(W4D2) — {@link #findUnresolvedDates()} 와 같은 정의를
+     * 날짜가 아니라 건수로 센다.
+     *
+     * <h3>왜 이 쿼리가 새로 필요한가 — 이 값은 테이블에 바로 있지 않다</h3>
+     * {@code reconciliation_run.discrepancy_count} 는 <b>run 한 번의 스냅샷</b>이다. 그냥 다 더하면
+     * 같은 불일치를 며칠째 세는 만큼 중복으로 센다 — 관측을 쌓는 설계(W3D5)의 당연한 귀결이다.
+     * "지금 수위"를 얻으려면 <b>날짜마다 최신 run 만 골라</b> 합쳐야 한다.
+     *
+     * <p><b>이게 메트릭에 Counter 를 못 쓰는 이유와 같은 뿌리다.</b> 재대사는 새 불일치가 아니라
+     * 같은 불일치를 다시 본 것이라, 누적하면 해소돼도 안 내려간다. 여기서도 저기서도
+     * <b>관측이 아니라 대상을 센다</b>.
+     *
+     * <p>스크레이프마다(15s) 돈다. 미해소 날짜는 설계상 소수이고 최신 run 만 보므로 가볍다.
+     */
+    @Query("""
+            SELECT COALESCE(SUM(r.discrepancyCount), 0) FROM ReconciliationRun r
+             WHERE r.discrepancyCount > 0
+               AND r.id = (SELECT MAX(r2.id) FROM ReconciliationRun r2
+                            WHERE r2.settlementDate = r.settlementDate)
+            """)
+    long sumUnresolvedDiscrepancies();
+
+    /**
+     * <b>대사가 마지막으로 돈 시각</b>(W4D2). 없으면 {@code null} — 한 번도 안 돌았다는 뜻이다.
+     *
+     * <h3>왜 불일치 건수만으로는 부족한가</h3>
+     * 미해소 건수 게이지는 배치가 <b>3일째 멈춰 있어도 계속 0</b>을 돌려준다(아무도 해소를
+     * 안 했으니 값이 안 변하는 게 <i>옳다</i>). DB 도 앱도 멀쩡히 응답하므로 어디에도 빨간불이
+     * 안 뜬다 — <b>"깨끗하다"와 "아무도 안 봤다"가 같은 모양</b>이 되는 자리다.
+     *
+     * <p>W3D5 가 {@code ReconciliationRun} 테이블을 만든 이유가 <i>"부재에 뜻을 주기 위해"</i>
+     * 였는데, 그건 <b>날짜 단위</b>의 부재였다. 배치 자체가 멈춘 부재는 그보다 한 층 위에 있고,
+     * 이 값이 그 층을 덮는다: {@code time() - metric > 26h}.
+     *
+     * <p>run 은 불일치가 0 건이어도 남으므로({@code ReconciliationRun} javadoc) 이 시각은
+     * 대사가 돌 때마다 앞으로 간다.
+     */
+    @Query("SELECT MAX(r.observedAt) FROM ReconciliationRun r")
+    OffsetDateTime findLastObservedAt();
 
     /**
      * 그 날짜의 run 이력을 <b>최신순</b>으로. "며칠째 안 메워지는가"를 세는 데 쓴다.
