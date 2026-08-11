@@ -2,6 +2,7 @@ package com.settleflow.payment.domain;
 
 import com.settleflow.ledger.domain.Journal;
 import com.settleflow.order.domain.Order;
+import com.settleflow.subscription.domain.BillingCycle;
 import jakarta.persistence.*;
 import lombok.Getter;
 
@@ -17,9 +18,29 @@ public class Payment {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @ManyToOne(fetch = FetchType.LAZY, optional = false)
-    @JoinColumn(name = "order_id", nullable = false)
+    /**
+     * 주문 결제면 주문, 구독 청구면 <b>null</b>(W5D1). 배타적 아크의 한쪽이다 —
+     * 정확히 하나만 채워지는 걸 {@code chk_payment_parent_arc} 가 지킨다.
+     *
+     * <p>널 허용으로 바꾼 게 6주치 전제를 푼 것이므로, 이 값을 무조건 걷는 자리는
+     * <b>주문 결제 경로에서만</b> 불려야 한다({@code LedgerService.sharesOf},
+     * {@code PaymentCompletedEvent.from}, {@code Order#onPaymentConfirmed} 호출부).
+     * 그 분기는 {@code PaymentTransitionService} 의 진입점이 가른다 — 여기가 아니다.
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "order_id")
     private Order order;
+
+    /**
+     * 구독 청구면 그 주기, 주문 결제면 <b>null</b>. 배타적 아크의 나머지 한쪽.
+     *
+     * <p><b>한 주기에 payment 행이 여럿이다</b> — 재시도 1회 = 이 행 하나. UNIQUE 가 아닌 게
+     * 설계의 요점이고, 그래서 {@code BillingCycle.onPaymentFailed} 가 기댈 수 있는
+     * "시도 1회당 정확히 한 번"이라는 보증이 성립한다(중복 통보는 이 행의 전이표가 흡수한다).
+     */
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "billing_cycle_id", updatable = false)
+    private BillingCycle billingCycle;
 
     @ManyToOne(fetch = FetchType.LAZY)
     @JoinColumn(name = "journal_id", unique = true)
@@ -66,12 +87,34 @@ public class Payment {
 
     protected Payment() {}
 
+    /** 주문 결제. */
     public Payment(Order order, Long amount) {
+        this(amount);
         this.order = order;
+    }
+
+    /**
+     * 구독 청구 <b>시도 1회</b>(W5D1). 재시도마다 이 생성자로 새 행이 난다 —
+     * {@code merchantPaymentId} 가 시도마다 새로 발급되는 게 멱등의 단위를 시도로 만든다.
+     */
+    public Payment(BillingCycle billingCycle, Long amount) {
+        this(amount);
+        this.billingCycle = billingCycle;
+    }
+
+    private Payment(Long amount) {
         this.amount = amount;
         this.merchantPaymentId = UUID.randomUUID();
         this.status = PaymentStatus.PENDING;
         this.reservedRefundAmount = 0L;
+    }
+
+    /**
+     * 구독 청구인가. {@code payment_kind} 같은 컬럼을 따로 두지 않는다 — FK 자체가 답이라
+     * 판별자와 관계가 어긋날 수 없다(한 칸이 둘을 겸하지 않게 하는 것과 같은 이유).
+     */
+    public boolean isSubscriptionCharge() {
+        return this.billingCycle != null;
     }
 
     public TransitionResult onApproved() {

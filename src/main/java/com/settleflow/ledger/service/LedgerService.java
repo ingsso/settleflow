@@ -66,6 +66,34 @@ public class LedgerService {
     }
 
     /**
+     * 구독 청구 분개(W5D1). <b>두 줄이다</b>:
+     *
+     * <pre>
+     *   CASH                 차변 amount   ← 받은 돈
+     *   SUBSCRIPTION_REVENUE 대변 amount   ← 그 셀러가 낸 이용료
+     * </pre>
+     *
+     * <p>{@link #recordPayment} 와 달리 안분이 없다 — 셀러가 하나로 정해져 있고
+     * ({@code subscription.seller_id}) 우리가 뗄 몫이라는 개념이 없다. 그래서
+     * {@code sharesOf} 를 안 탄다. <b>구독 결제에 주문이 없어도 되는 이유가 이것이다.</b>
+     *
+     * <p>{@code SELLER_PAYABLE} 줄이 없으므로 V8 정산 집계에 안 잡힌다 — 구독료는
+     * 셀러에게 줄 돈이 아니라 셀러에게서 받은 돈이니 정산액에 섞이면 안 된다.
+     *
+     * <p>{@code JournalType} 은 {@code PAYMENT} 다. 그 축은 "돈이 들어오냐 나가냐"고,
+     * "무슨 돈이냐"는 계정이 답한다.
+     */
+    public Journal recordSubscriptionCharge(Payment payment) {
+        Seller seller = payment.getBillingCycle().getSubscription().getSeller();
+        long amount = payment.getAmount();
+
+        Journal journal = Journal.forPayment(List.of(
+                new EntrySpec(LedgerAccount.CASH, EntrySide.DEBIT, amount, null),
+                new EntrySpec(LedgerAccount.SUBSCRIPTION_REVENUE, EntrySide.CREDIT, amount, seller.getId())));
+        return journalRepository.save(journal);
+    }
+
+    /**
      * 환불 역분개(W2D5). 고객에게 나간 {@code amount} 를 <b>셀러별 미지급금에서</b> 깎는다.
      *
      * <pre>

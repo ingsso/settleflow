@@ -216,6 +216,12 @@ public class ReconciliationService {
 
         // --- 결제분: subtotal → 수수료 → 미지급금 ---
         for (Payment payment : paymentRepository.findPaidInRange(from, to)) {
+            // 구독 청구는 건너뛴다(W5D1). 회피가 아니라 정의상 0 이다 — 구독 분개엔
+            // SELLER_PAYABLE 줄이 없고(CASH/SUBSCRIPTION_REVENUE 2줄), 배치 쪽 V8 집계도
+            // SELLER_PAYABLE 만 합치므로 양쪽이 똑같이 0 을 낸다. 여기서 안 거르면
+            // sharesOf 가 null 주문을 걷어 NPE 다 — 대사 배치 전체가 그날 죽는다.
+            if (payment.isSubscriptionCharge()) continue;
+
             for (SellerShare share : sharesOf(payment)) {
                 // LedgerService.recordPayment 와 같은 식. 정수 나눗셈이 버림이라 절반을 더해 반올림하고,
                 // 미지급금은 빼서 구한다.
