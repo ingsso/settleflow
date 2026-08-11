@@ -737,9 +737,9 @@
 
 ## Week 5 — 정기결제(구독) 재시도 로직 (Dunning)
 
-- Day 1: 
+- Day 1: 계획서 전이표 폐기(5주 연속) — 되돌아오는 축을 `billing_cycle` 로 내려 ABA 를 끊고, 계약/건강도 두 축을 **갈라지기 전에** 분리. **D3 를 앞당겨 흡수**(payment 를 시도 층으로, `order_id` 널 허용 + 배타적 아크, 구독료 `SUBSCRIPTION_REVENUE` 2줄 분개). [실측] 전체 **131건 green**(신규 전이표 27건 포함, 단일 실행). 거짓 초록 2회 · Claude 오류 3건 · 음성대조군 3건 대기 → [W5D1](week5/W5D1_구독_상태머신.md)
 - Day 2: 
-- Day 3: 
+- Day 3: **D1 로 이동** — 재시도-멱등성 연동의 스키마·배관은 D1 에서 닫았다. 남은 것은 통합테스트와 `SUBSCRIPTION_CHARGED` 이벤트 → [W5D1 §12 이월](week5/W5D1_구독_상태머신.md)
 - Day 4: 
 - Day 5: 
 
