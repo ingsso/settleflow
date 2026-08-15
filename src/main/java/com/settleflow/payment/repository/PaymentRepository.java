@@ -103,6 +103,53 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
                                         @Param("excludePaymentId") Long excludePaymentId);
 
     /**
+     * 이 주기에서 <b>결말이 안 난</b> 시도(W5D4). 있으면 새 시도를 만들지 않고 <b>그것을 재전송</b>한다.
+     *
+     * <h3>왜 PENDING 과 UNKNOWN 을 같이 보나</h3>
+     * 둘 다 <i>"돈이 움직였는지 모른다"</i> 이기 때문이다. 뜻이 조금 다를 뿐이다 —
+     * {@code PENDING} 은 <i>"보냈는지도 확실치 않다"</i>(결과 반영 전에 죽었다),
+     * {@code UNKNOWN} 은 <i>"보냈는데 답을 못 들었다"</i>. <b>어느 쪽이든 새 청구를 낼 근거가
+     * 없다.</b> {@code RefundRepository#markUnknown} 이 <i>"정보의 부재라 되돌릴 근거가 없다"</i>
+     * 고 적어둔 것의 반대 방향이고 같은 규칙이다 — 되돌릴 근거가 없으면 새로 낼 근거도 없다.
+     *
+     * <h3>정상 경로에선 최대 하나다</h3>
+     * 미결 시도가 있으면 새 시도를 안 만들기 때문이다. 그래도 {@code ORDER BY id} 로 결정적으로
+     * 고른다 — 과거 데이터나 버그로 둘이 되면 <b>가장 오래된 것부터</b> 결말을 받는다.
+     *
+     * <p>{@code UNKNOWN} 은 {@code countConcludedAttempts} 에서는 <b>세어진다</b>. 모순이 아니다:
+     * 상한을 셀 때는 <i>"청구를 몇 번 걸었나"</i> 를 묻고(그래서 무한 재시도가 안 난다),
+     * 여기서는 <i>"결말을 아직 못 받은 게 있나"</i> 를 묻는다. <b>다른 질문이라 답이 다르다.</b>
+     */
+    @Query(value = """
+            SELECT id
+              FROM payment
+             WHERE billing_cycle_id = :billingCycleId
+               AND status IN ('PENDING', 'UNKNOWN')
+             ORDER BY id
+             LIMIT 1
+            """, nativeQuery = true)
+    Optional<Long> findUnresolvedAttemptId(@Param("billingCycleId") Long billingCycleId);
+
+    /**
+     * 오래 결말이 안 난 시도의 수(W5D4 관측).
+     *
+     * <p>재전송은 <b>답을 얻을 때까지 안 끊는다</b>(무한 질의는 무한 청구와 다르다 — 같은 키로
+     * 묻는 것이라 돈이 안 는다). 대신 <b>조용하면 안 된다</b>: 영영 안 풀리는 시도가 쌓여도
+     * 아무 신호가 없으면 그 주기는 미결인 채 잊힌다.
+     *
+     * <p>{@code RefundRepository#sumReservedMinusCompleted} 가 <i>"이게 오래 0 이 아니면
+     * UNKNOWN 에 물린 예약"</i> 이라고 세워둔 것과 같은 자리다.
+     */
+    @Query(value = """
+            SELECT count(*)
+              FROM payment
+             WHERE billing_cycle_id IS NOT NULL
+               AND status IN ('PENDING', 'UNKNOWN')
+               AND created_at < :threshold
+            """, nativeQuery = true)
+    int countStaleUnresolvedAttempts(@Param("threshold") OffsetDateTime threshold);
+
+    /**
      * 환불 금액을 원자적으로 <b>예약</b>한다(W2D4, 개명 W3D4). <b>판정과 실행이 한 문장이다</b> —
      * 반환된 영향 행 수가 곧 "환불 요청을 받아주는가"의 답이다.
      *

@@ -1,5 +1,6 @@
 package com.settleflow.subscription.service;
 
+import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.subscription.repository.BillingCycleRepository;
 import com.settleflow.subscription.repository.SubscriptionRepository;
 import org.slf4j.Logger;
@@ -7,6 +8,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.List;
@@ -53,15 +55,24 @@ public class DunningScheduler {
      */
     private static final int BATCH_LIMIT = 100;
 
+    /**
+     * 이 시간을 넘겨도 결말이 안 난 시도는 경고 대상이다(W5D4).
+     * 정상적인 PG 왕복·웹훅 배달보다 넉넉하되, 하루를 넘기지는 않는다.
+     */
+    private static final Duration STALE_AFTER = Duration.ofHours(6);
+
     private final SubscriptionRepository subscriptionRepository;
     private final BillingCycleRepository billingCycleRepository;
+    private final PaymentRepository paymentRepository;
     private final SubscriptionChargeService chargeService;
 
     public DunningScheduler(SubscriptionRepository subscriptionRepository,
                             BillingCycleRepository billingCycleRepository,
+                            PaymentRepository paymentRepository,
                             SubscriptionChargeService chargeService) {
         this.subscriptionRepository = subscriptionRepository;
         this.billingCycleRepository = billingCycleRepository;
+        this.paymentRepository = paymentRepository;
         this.chargeService = chargeService;
     }
 
@@ -99,6 +110,26 @@ public class DunningScheduler {
         List<Long> due = billingCycleRepository.findRetryDue(now, BATCH_LIMIT);
         if (!due.isEmpty()) log.info("재시도 도래 {}건 now={}", due.size(), now);
         due.forEach(cycleId -> chargeService.retryCycle(cycleId, now));
+        reportStaleUnresolved(now);
         return due.size();
+    }
+
+    /**
+     * 오래 결말이 안 난 시도를 드러낸다(W5D4).
+     *
+     * <p>미결 시도({@code PENDING}·{@code UNKNOWN})는 <b>재전송으로 답을 얻을 때까지 안 끊는다</b> —
+     * 같은 키로 묻는 것이라 돈이 안 늘기 때문이다. 그래서 <b>멈추게 하는 장치가 없고</b>,
+     * 대신 <b>드러나게 하는 장치</b>가 필요하다. 이게 없으면 영영 안 풀리는 주기가 조용히 쌓인다.
+     *
+     * <p>지금은 경고 로그뿐이다 — {@code PaymentTransitionService.recordAnomaly} 가
+     * <i>"이상 테이블은 나중에 온다"</i> 로 남긴 것과 같은 자리이고, 메트릭으로 올리는 건
+     * W5D4 이월이다.
+     */
+    private void reportStaleUnresolved(OffsetDateTime now) {
+        int stale = paymentRepository.countStaleUnresolvedAttempts(now.minus(STALE_AFTER));
+        if (stale > 0) {
+            log.warn("[STALE] 결말 없는 구독 청구 시도 {}건 ({} 초과) — 재전송은 계속되지만 사람이 봐야 한다",
+                    stale, STALE_AFTER);
+        }
     }
 }

@@ -24,6 +24,7 @@ import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -162,13 +163,36 @@ public class SubscriptionChargeService {
     }
 
     /**
-     * 주기 하나에 시도를 하나 붙인다 — 단, <b>상한을 먼저 본다</b>.
-     * 남은 시도가 없으면 붙이지 않고 그 자리에서 포기시킨다.
+     * 주기 하나를 다음으로 밀 준비를 한다. <b>새 시도를 만들기 전에 미결 시도가 있는지 본다</b>(W5D4).
+     *
+     * <h3>미결 시도가 있으면 재전송이지 새 청구가 아니다</h3>
+     * {@code PENDING}·{@code UNKNOWN} 은 <i>"돈이 움직였는지 모른다"</i> 이고, 모르는 상태에서
+     * 새 {@code merchantPaymentId} 로 청구를 내면 PG 는 그걸 <b>정당한 별개 청구</b>로 받는다
+     * (W5D3 [실측]: 크래시 뒤 재집기 → PG approve 3회 · 서로 다른 키 3개).
+     *
+     * <p>같은 키로 다시 보내면 그건 <b>같은 시도의 재전송</b>이고, 멱등키가 정확히 그걸 위해
+     * 있는 물건이다. <b>시도 층은 안 무너진다</b> — 행이 안 늘고, 상한 계산도 안 흔들리며
+     * ({@code PENDING} 은 애초에 안 세고 {@code UNKNOWN} 은 이미 세어졌다),
+     * 결과 통보는 그 {@code payment} 행의 전이표가 흡수한다.
+     *
+     * <h3>재전송에는 상한을 안 건다</h3>
+     * 상한은 <i>"청구를 몇 번 걸었나"</i> 를 세는데 재전송은 청구를 안 늘린다. 답을 얻을
+     * 때까지 계속 묻는다 — <b>무한 질의는 무한 청구와 다르다.</b> 대신 조용하면 안 되므로
+     * {@code DunningScheduler} 가 오래된 미결 시도를 센다.
      *
      * <p>{@code null} 반환은 "이 주기는 이제 청구하지 않는다"는 뜻이다.
      */
     private Attempt stageAttempt(Long cycleId) {
         BillingCycle cycle = billingCycleRepository.findById(cycleId).orElseThrow();
+
+        Optional<Long> unresolved = paymentRepository.findUnresolvedAttemptId(cycleId);
+        if (unresolved.isPresent()) {
+            Payment attempt = paymentRepository.findById(unresolved.get()).orElseThrow();
+            log.info("미결 시도 재전송 billingCycleId={} paymentId={} status={} — 새 청구가 아니다",
+                    cycleId, attempt.getId(), attempt.getStatus());
+            return new Attempt(attempt.getMerchantPaymentId(), attempt.getAmount(), cycleId, true);
+        }
+
         int concluded = paymentRepository.countConcludedAttempts(cycleId);
         if (!policy.hasRetryLeft(concluded)) {
             abandon(cycle, concluded);
@@ -180,7 +204,7 @@ public class SubscriptionChargeService {
     private Attempt newAttempt(BillingCycle cycle) {
         Payment payment = new Payment(cycle, cycle.getAmount());
         paymentRepository.save(payment);
-        return new Attempt(payment.getMerchantPaymentId(), payment.getAmount(), cycle.getId());
+        return new Attempt(payment.getMerchantPaymentId(), payment.getAmount(), cycle.getId(), false);
     }
 
     /**
@@ -219,6 +243,15 @@ public class SubscriptionChargeService {
                 concludeFailure(attempt);
             }
         } catch (CallNotPermittedException e) {
+            if (attempt.resend()) {
+                // ★ W4D1 의 "안 보냈으니 확실한 앎" 은 <b>새 시도</b>에만 참이다.
+                // 재전송이 안 나간 건 <b>원래 요청이 어떻게 됐는지</b>를 아무것도 안 알려준다 —
+                // 여기서 실패로 확정하면 "모른다"를 잃고, 그 시도는 다시 물어볼 대상에서 빠진다.
+                // 아무것도 안 하고 물러난다. 다음 폴링이 같은 키로 또 묻는다.
+                log.info("PG 차단기 개방 — 재전송을 보내지 못했다. 결말은 그대로 미결 billingCycleId={}",
+                        attempt.cycleId());
+                return;
+            }
             log.info("PG 차단기 개방 — 구독 청구를 보내지 않고 실패로 확정 billingCycleId={}", attempt.cycleId());
             concludeFailure(attempt);
         } catch (PgTimeoutException e) {
@@ -245,6 +278,6 @@ public class SubscriptionChargeService {
      * tx1 밖으로 들고 나갈 값. PG 호출이 트랜잭션 밖이라 엔티티가 아니라 값만 꺼낸다
      * ({@code PaymentService.Pending} 과 같은 이유).
      */
-    private record Attempt(UUID merchantPaymentId, long amount, Long cycleId) {
+    private record Attempt(UUID merchantPaymentId, long amount, Long cycleId, boolean resend) {
     }
 }
