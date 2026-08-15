@@ -243,20 +243,32 @@ class DunningSchedulerTest extends IntegrationTestSupport {
         assertThat(picked).isZero();          // ★ 유실이 아니라 지연 — P2 는 영영 못 집는다
     }
 
-    // ---------- 6. ★ UNKNOWN 만 쌓여도 상한에서 멈춘다 (백스톱) ----------
+    // ---------- 6. ★ UNKNOWN 은 더 이상 쌓이지 않는다 (W5D4 에서 뜻이 바뀐 테스트) ----------
 
     /**
-     * ★ 이 테스트가 겨누는 건 <b>집기 직전의 상한 판정</b>이다.
+     * ★ <b>이 테스트는 W5D4 에 뜻이 바뀌었다.</b> 기록해둘 값이 있어 경위를 남긴다.
      *
-     * <p>정상 경로의 상한 판정은 실패 통보 직후에 있는데, {@code UNKNOWN} 은 주기에 통보되지
-     * 않아 그 자리에 도달하지 못한다. 백스톱이 없으면 P1 이 청구일마다 이 주기에 시도를
-     * 영원히 붙인다 — {@code UNKNOWN} 을 시도로 세기로 한 결정이 그것만으로는 값을 못 낸다.
+     * <h3>W5D2 에 겨누던 것</h3>
+     * <i>집기 직전의 상한 판정(백스톱)</i>이었다. 그때는 {@code UNKNOWN} 이 날 때마다
+     * <b>새 시도</b>가 붙었고, 그 시도들이 쌓여 4번째에 백스톱이 주기를 포기시켰다.
+     * 단언은 {@code ABANDONED} · 시도 4개였다.
      *
-     * <p>겹침 처리도 여기서 같이 드러난다: 열린 주기를 회수하면서 <b>새 주기도 만든다</b>
-     * (결정 5 — 둘은 다른 기간의 돈이다).
+     * <h3>W5D4 에 사라진 것</h3>
+     * 재전송이 들어오면서 <b>{@code UNKNOWN} 은 새 시도를 만들지 않는다</b> — 결말이 안 난
+     * 시도는 같은 키로 다시 물을 뿐이다. 그래서 시도가 안 쌓이고, 백스톱이 세는 값이
+     * 1 에서 안 움직이며, 주기는 답을 얻을 때까지 {@code PENDING} 으로 남는다.
+     * <b>그게 의도다</b>(W5D4: 무한 질의는 무한 청구와 다르다).
+     *
+     * <h3>★ 그래서 백스톱은 지금 아무도 안 재고 있다</h3>
+     * 없애면 안 된다 — 실패가 <i>확정</i>된 시도가 쌓이는 경로에서는 여전히 마지막 벽이다.
+     * 다만 <b>W5D2 대조군 B 가 red 로 잡아내던 그 시나리오가 사라졌으므로</b>, 지금 백스톱을
+     * 지워도 red 를 낼 테스트가 없다. W5D2 대조군 D(P1 리스)와 같은 자리에 하나가 더 생겼다.
+     *
+     * <p>겹침 처리는 그대로 드러난다: 열린 주기를 회수하면서 <b>새 주기도 만든다</b>
+     * (W5D2 결정 5 — 둘은 다른 기간의 돈이다).
      */
     @Test
-    void UNKNOWN_만_쌓여도_네_번째_시도에서_멈춘다() {
+    void UNKNOWN_은_재전송되므로_시도가_쌓이지_않는다() {
         LocalDate today = LocalDate.of(2026, 8, 15);
         createSubscription(AMOUNT_TIMEOUT, today);
 
@@ -274,11 +286,14 @@ class DunningSchedulerTest extends IntegrationTestSupport {
 
         String firstStatus = str("SELECT status FROM billing_cycle WHERE id = " + firstCycleId);
         long firstAttempts = count("SELECT count(*) FROM payment WHERE billing_cycle_id = " + firstCycleId);
+        long firstKeys = count(
+                "SELECT count(DISTINCT merchant_payment_id) FROM payment WHERE billing_cycle_id = " + firstCycleId);
         long cycles = count("SELECT count(*) FROM billing_cycle");
 
-        assertThat(firstStatus).isEqualTo("ABANDONED");   // 백스톱이 없으면 PENDING 인 채 영원히 산다
-        assertThat(firstAttempts).isEqualTo(4);           // 사다리와 같은 상한
-        assertThat(cycles).isEqualTo(5);                  // 회수와 별개로 새 주기는 매번 생긴다
+        assertThat(firstStatus).isEqualTo("PENDING");   // 결말을 못 받았으니 미결이다 — 포기가 아니다
+        assertThat(firstAttempts).isEqualTo(1);         // ★ W5D2 엔 4였다. 재전송이라 안 쌓인다
+        assertThat(firstKeys).isEqualTo(1);             // PG 에겐 계속 같은 한 건이다
+        assertThat(cycles).isEqualTo(5);                // 회수와 별개로 새 주기는 매번 생긴다
     }
 
     // ---------- helpers ----------

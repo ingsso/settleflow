@@ -44,9 +44,21 @@ import static org.mockito.Mockito.verify;
  *   문장2  그런데 돈은 두 번 나간다 — 같은 주기에 시도가 둘이면 PG 호출도 둘
  * </pre>
  *
- * 둘 다 참이므로 결론은 <b>"멱등키는 중복 청구를 막는 물건이 아니다"</b> 다. 키가 지키는 건
- * <i>같은 시도의 재전송</i>이고, 이중 청구는 <i>같은 주기의 두 시도</i>에서 난다 —
- * 그 둘은 {@code merchantPaymentId} 가 서로 달라 PG 에게 <b>정당한 별개 청구</b>다.
+ * 키가 지키는 건 <i>같은 시도의 재전송</i>이고, 이중 청구는 <i>같은 주기의 두 시도</i>에서
+ * 난다 — 그 둘은 {@code merchantPaymentId} 가 서로 달라 PG 에게 <b>정당한 별개 청구</b>다.
+ *
+ * <h3>★ W5D4 에 결론을 한 칸 좁혔다</h3>
+ * W5D3 은 여기서 <i>"멱등키는 중복 청구를 막는 물건이 아니다"</i> 로 끝냈는데 그건 넓었다.
+ * 정확히는 <b>"우리가 재전송해야 할 자리에서 새 시도를 만들었다"</b> 다 — 결말이 안 난 시도는
+ * <i>새 청구가 필요하다</i>가 아니라 <i>답을 아직 못 들었다</i> 이고, 같은 키로 다시 보내는 건
+ * 재전송이라 키가 정확히 그걸 겨눈다. W5D3 §7 이 <i>"주기 단위 키를 주면 시도 층이 무너진다"</i>
+ * 고 적은 건 <b>세 번째 선택지(재전송)를 못 본 것</b>이었다.
+ *
+ * <h3>여기 있던 크래시 테스트는 옮겼다</h3>
+ * {@code 크래시로_리스만_남으면_같은_주기에_PG_청구가_두_번_나간다} 가 W5D3 의 반증 본체였고,
+ * <b>[실측] PG approve 3회 · 서로 다른 키 3개</b> 를 냈다. W5D4 가 그 창을 닫으면서 같은
+ * 시나리오가 <b>키 2개</b>를 내므로, 고친 뒤의 단언은 {@code SubscriptionResendTest} 에 있다.
+ * 버그를 단언하는 테스트를 남겨둘 수는 없어 옮겼고, 어제 수치는 W5D3 문서 §7 에 남아 있다.
  *
  * <h3>★ 계기를 바꿨다 — 어제 수치는 우리 DB 를 쟀다</h3>
  * W5D2 의 <i>"동시 폴링 10개 → payment 행 2개"</i> 는 <b>우리 기록</b>이지 PG 가 아니다.
@@ -116,70 +128,12 @@ class SubscriptionIdempotencyTest extends IntegrationTestSupport {
         assertThat(cash).isEqualTo(AMOUNT);   // 장부에 돈은 한 번만 적혔다
     }
 
-    // ---------- 문장2 — 그런데 돈은 두 번 나간다 ----------
-
-    /**
-     * ★ <b>반증의 본체.</b> 리스가 정당하게 지는 경로 — 청구를 보낸 뒤 결과를 적기 전에 죽는다.
-     *
-     * <pre>
-     *   tx1  리스 커밋 + PENDING 시도 A            ← 여기까지는 남는다
-     *   ---- PG 청구 나감 (돈이 움직였다) ----
-     *        크래시                                ← tx2 가 영영 안 온다
-     *   ---- 리스 만료 ----
-     *   tx1' 리스 재획득 + PENDING 시도 B
-     *   ---- PG 청구 또 나감 ----                  ← 같은 주기, 두 번째 돈
-     * </pre>
-     *
-     * <p>A 와 B 는 서로 다른 {@code merchantPaymentId} 를 갖는다. PG 는 둘을 <b>정당한 별개
-     * 청구</b>로 처리한다 — 멱등키가 개입할 자리가 없다. 키가 고장난 게 아니라 <b>이 문제를
-     * 겨누는 물건이 아니다.</b>
-     *
-     * <p>크래시는 delegate 가 던지는 일반 {@code RuntimeException} 으로 만든다.
-     * {@code SubscriptionChargeService.charge} 는 {@code CallNotPermittedException} 과
-     * {@code PgTimeoutException} 만 잡으므로 이 예외는 그대로 빠져나가고 tx2 가 안 돈다 —
-     * 그게 정확히 "청구는 나갔고 결과는 못 적었다"는 창이다.
-     */
-    @Test
-    void 크래시로_리스만_남으면_같은_주기에_PG_청구가_두_번_나간다() {
-        createSubscription();
-
-        // 1) 원 청구를 실패시켜 주기를 FAILED + 예약 상태로 만든다
-        willReturn(PgResult.DECLINED).given(delegate).approve(any(), anyLong());
-        scheduler.runBillingDue(TODAY);
-        OffsetDateTime t0 = OffsetDateTime.now();
-
-        // 2) 재시도 — PG 는 청구를 받았고(호출은 세어진다) 우리가 죽는다
-        willThrow(new RuntimeException("process died after PG charge"))
-                .given(delegate).approve(any(), anyLong());
-        assertThatThrownBy(() -> scheduler.runRetryDue(t0.plusDays(1).plusMinutes(1)))
-                .isInstanceOf(RuntimeException.class);
-
-        String cycleAfterCrash = str("SELECT status FROM billing_cycle");
-        long attemptsAfterCrash = num("SELECT count(*) FROM payment");
-        long pendingAfterCrash = num("SELECT count(*) FROM payment WHERE status = 'PENDING'");
-
-        // 3) 리스가 만료된 뒤 폴러가 그 주기를 다시 집는다
-        willReturn(PgResult.APPROVED).given(delegate).approve(any(), anyLong());
-        scheduler.runRetryDue(t0.plusDays(1).plusMinutes(30));
-
-        long attempts = num("SELECT count(*) FROM payment");
-        List<?> mpids = em.createNativeQuery(
-                "SELECT DISTINCT merchant_payment_id FROM payment").getResultList();
-
-        // ★ 계기: 우리 행이 아니라 PG 호출 횟수를 센다
-        verify(delegate, times(3)).approve(any(), anyLong());
-
-        System.out.printf("[실측] 문장2 — 크래시 직후 주기=%s 시도=%d(PENDING %d) → 재집기 후 시도=%d%n",
-                cycleAfterCrash, attemptsAfterCrash, pendingAfterCrash, attempts);
-        System.out.printf("[실측] ★ PG approve 호출 = 3회 (원청구 1 + 크래시난 청구 1 + 재청구 1)%n");
-        System.out.printf("[실측] ★ 서로 다른 merchantPaymentId = %d개 — PG 에겐 전부 별개 청구다%n",
-                mpids.size());
-
-        assertThat(cycleAfterCrash).isEqualTo("FAILED");
-        assertThat(pendingAfterCrash).isEqualTo(1);   // 고아 시도 A 가 남았다
-        assertThat(attempts).isEqualTo(3);
-        assertThat(mpids).hasSize(3);                 // 키가 셋 = PG 가 셋으로 본다
-    }
+    // ---------- 문장2 — 같은 주기에 시도가 둘이면 키도 둘 ----------
+    //
+    // W5D3 의 크래시 시나리오(PG approve 3회 · 서로 다른 키 3개)는 W5D4 가 그 창을 닫으면서
+    // SubscriptionResendTest 로 옮겼다. 고친 뒤 같은 시나리오는 키 2개를 낸다.
+    // 아래 테스트는 크래시가 없어도 성립하는 쪽 — "실패가 확정된 시도 뒤의 재시도는 새 키다" —
+    // 만 남긴다. 그건 W5D4 이후에도 참이고, 참이어야 한다(그게 시도 층이다).
 
     /**
      * 위 시나리오의 결론을 한 줄로 못 박는다: <b>같은 주기인데 키가 다르다.</b>
