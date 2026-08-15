@@ -230,19 +230,15 @@ public class SubscriptionChargeService {
     }
 
     /**
-     * tx2 — 실패를 주기에 반영한다. <b>상한 판정이 이름으로 드러나는 자리다</b>(결정 2).
+     * tx2 — 실패를 주기에 반영한다.
      *
-     * <p>{@code +1} 이 붙는 이유: {@code countConcludedAttempts} 는 {@code PENDING} 을 안 세는데
-     * 방금 실패한 이 시도는 아직 {@code PENDING} 이다. 즉 세어진 값은 <i>이전까지</i>의 결말 수고,
-     * 정책이 묻는 건 <i>이번을 포함한</i> 수다.
+     * <p><b>규칙은 여기 없다</b>(W5D3 에서 옮겼다). 다음 재시도 시각이냐 포기냐를 정하는 일은
+     * {@code PaymentTransitionService.applySubscriptionFailure} 가 트랜잭션 안에서 한다 —
+     * 웹훅이 두 번째 호출부가 되면서, 규칙을 호출부마다 두면 복제가 되기 때문이다.
+     * 이 메서드에 남은 건 <i>"실패 시각은 지금이다"</i> 하나뿐이다.
      */
     private void concludeFailure(Attempt attempt) {
-        OffsetDateTime failedAt = OffsetDateTime.now();
-        int concluded = paymentRepository.countConcludedAttempts(attempt.cycleId()) + 1;
-
-        policy.nextRetryAt(concluded, failedAt).ifPresentOrElse(
-                next -> transitions.applySubscriptionDeclined(attempt.merchantPaymentId(), null, next),
-                () -> transitions.applySubscriptionExhausted(attempt.merchantPaymentId(), null));
+        transitions.applySubscriptionFailure(attempt.merchantPaymentId(), null, OffsetDateTime.now());
     }
 
     /**

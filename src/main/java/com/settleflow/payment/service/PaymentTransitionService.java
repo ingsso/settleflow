@@ -12,6 +12,7 @@ import com.settleflow.payment.event.PaymentCompletedEvent;
 import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.subscription.domain.BillingCycle;
 import com.settleflow.subscription.domain.SubscriptionTransitionResult;
+import com.settleflow.subscription.service.DunningPolicy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.OptimisticLockingFailureException;
@@ -43,15 +44,18 @@ public class PaymentTransitionService {
     private final PaymentRepository paymentRepository;
     private final LedgerService ledgerService;
     private final OutboxWriter outboxWriter;
+    private final DunningPolicy dunningPolicy;
     private final TransactionTemplate txTemplate;
 
     public PaymentTransitionService(PaymentRepository paymentRepository,
                                     LedgerService ledgerService,
                                     OutboxWriter outboxWriter,
+                                    DunningPolicy dunningPolicy,
                                     PlatformTransactionManager txManager) {
         this.paymentRepository = paymentRepository;
         this.ledgerService = ledgerService;
         this.outboxWriter = outboxWriter;
+        this.dunningPolicy = dunningPolicy;
         this.txTemplate = new TransactionTemplate(txManager);
     }
 
@@ -63,23 +67,24 @@ public class PaymentTransitionService {
      * 이상만 기록한다. 자세한 근거는 {@link Order#onPaymentConfirmed()}.
      */
     public TransitionResult applyApproved(UUID merchantPaymentId, String pgTransactionId) {
-        return dispatch(merchantPaymentId, pgTransactionId,
-                Payment::onApproved,
-                payment -> {
-                    // 돈은 들어왔다 — 주문 상태와 무관하게 분개는 남긴다. TRANSITIONED 1회에만 불리므로
-                    // 중복 웹훅이 와도 journal 은 하나(W2D1 §4). tx2 안이라 PAID·journal 이 원자적으로 함께 커밋.
-                    Journal journal = ledgerService.recordPayment(payment);
-                    payment.linkJournal(journal);
+        return dispatch(merchantPaymentId, pgTransactionId, Payment::onApproved, this::orderApproved);
+    }
 
-                    // payment.completed 를 같은 tx 에 append(W3D1). fat 스냅샷은 방금 만든 journal 을
-                    // 거울처럼 읽어 만든다 — 이벤트와 장부가 갈라질 수 없다. journal 과 함께 원자적으로 커밋.
-                    outboxWriter.append(payment.getId(), EventType.PAYMENT_COMPLETED,
-                            PaymentCompletedEvent.from(payment, journal));
+    /** {@link #applyApproved} 의 부수효과. 형제와 갈라 두고 웹훅 라우팅이 골라 쓴다(W5D3). */
+    private void orderApproved(Payment payment) {
+        // 돈은 들어왔다 — 주문 상태와 무관하게 분개는 남긴다. TRANSITIONED 1회에만 불리므로
+        // 중복 웹훅이 와도 journal 은 하나(W2D1 §4). tx2 안이라 PAID·journal 이 원자적으로 함께 커밋.
+        Journal journal = ledgerService.recordPayment(payment);
+        payment.linkJournal(journal);
 
-                    if (payment.getOrder().onPaymentConfirmed() == OrderTransitionResult.CONFLICT) {
-                        recordOrderAnomaly(payment);
-                    }
-                });
+        // payment.completed 를 같은 tx 에 append(W3D1). fat 스냅샷은 방금 만든 journal 을
+        // 거울처럼 읽어 만든다 — 이벤트와 장부가 갈라질 수 없다. journal 과 함께 원자적으로 커밋.
+        outboxWriter.append(payment.getId(), EventType.PAYMENT_COMPLETED,
+                PaymentCompletedEvent.from(payment, journal));
+
+        if (payment.getOrder().onPaymentConfirmed() == OrderTransitionResult.CONFLICT) {
+            recordOrderAnomaly(payment);
+        }
     }
 
     /**
@@ -101,62 +106,70 @@ public class PaymentTransitionService {
      * {@code settlement.refund.requested} 하나다(W5D1 실측).
      */
     public TransitionResult applySubscriptionApproved(UUID merchantPaymentId, String pgTransactionId) {
-        return dispatch(merchantPaymentId, pgTransactionId,
-                Payment::onApproved,
-                payment -> {
-                    Journal journal = ledgerService.recordSubscriptionCharge(payment);
-                    payment.linkJournal(journal);
+        return dispatch(merchantPaymentId, pgTransactionId, Payment::onApproved, this::subscriptionApproved);
+    }
 
-                    if (payment.getBillingCycle().onPaymentSucceeded()
-                            == SubscriptionTransitionResult.CONFLICT) {
-                        recordCycleAnomaly(payment);
-                    }
-                });
+    /** {@link #applySubscriptionApproved} 의 부수효과. 웹훅 라우팅이 골라 쓴다(W5D3). */
+    private void subscriptionApproved(Payment payment) {
+        Journal journal = ledgerService.recordSubscriptionCharge(payment);
+        payment.linkJournal(journal);
+
+        if (payment.getBillingCycle().onPaymentSucceeded() == SubscriptionTransitionResult.CONFLICT) {
+            recordCycleAnomaly(payment);
+        }
     }
 
     /**
-     * 구독 청구 시도 실패, <b>재시도가 남았다</b>(W5D1).
+     * 구독 청구 시도가 <b>실패로 확정됐다</b>(W5D1 → W5D3 통합). 재시도를 예약하거나 주기를 포기한다.
      *
-     * <p>{@code nextRetryAt} 을 인자로 받는 이유: 간격 규칙(1일→3일→7일)은 정책이고,
-     * 엔티티는 시도 횟수를 모른다({@code attempt_count} 를 두지 않은 결과). 정책은 W5D2
-     * {@code DunningScheduler} 가 소유한다 — 여기는 배관이다.
+     * <h3>결말 규칙이 여기 하나뿐이다</h3>
+     * W5D1 엔 {@code applySubscriptionDeclined(nextRetryAt)} 과 {@code applySubscriptionExhausted()}
+     * 둘이 있었고, 둘 중 무엇을 부를지는 <b>호출부</b>가 정했다. 호출부가 폴러 하나일 땐 문제가
+     * 없었는데 W5D3 에서 <b>웹훅</b>이 두 번째 호출부가 되면서 갈렸다 — 웹훅은 간격 규칙도
+     * 시도 수도 모른다. 규칙을 양쪽에 복제하는 대신 <b>결말을 여기로 내렸다.</b>
      *
-     * <p><b>이 메서드가 성립하는 근거가 시도 층이다.</b> {@code BillingCycle.onPaymentFailed}
+     * <p>{@code onPaymentFailed} / {@code onRetriesExhausted} 라는 <b>이름의 분리는 그대로</b>다
+     * (W5D1 이 인자 하나가 시각과 포기 여부를 겸하지 않게 하려고 가른 것) — 갈린 자리가
+     * 서비스 진입점에서 엔티티 호출로 한 칸 내려갔을 뿐이다.
+     *
+     * <p><b>이 메서드가 성립하는 근거는 여전히 시도 층이다.</b> {@code BillingCycle.onPaymentFailed}
      * 는 중복 통보를 걸러낼 수 없는데(상태만으로 "새 실패"와 "재통보"를 못 가름), 그 걸러내기를
      * {@code Payment::onDeclined} 가 먼저 한다 — 이미 {@code FAILED} 인 시도 행에 같은 통보가
-     * 또 오면 {@code IGNORED} 라서 아래 람다가 아예 안 불린다.
+     * 또 오면 {@code IGNORED} 라 부수효과가 아예 안 불린다.
+     *
+     * @param failedAt 이 시도가 실패한 시각. 백오프의 기준이다({@link DunningPolicy})
      */
-    public TransitionResult applySubscriptionDeclined(UUID merchantPaymentId,
-                                                      String pgTransactionId,
-                                                      OffsetDateTime nextRetryAt) {
+    public TransitionResult applySubscriptionFailure(UUID merchantPaymentId,
+                                                     String pgTransactionId,
+                                                     OffsetDateTime failedAt) {
         return dispatch(merchantPaymentId, pgTransactionId,
                 Payment::onDeclined,
-                payment -> {
-                    if (payment.getBillingCycle().onPaymentFailed(nextRetryAt)
-                            == SubscriptionTransitionResult.CONFLICT) {
-                        recordCycleAnomaly(payment);
-                    }
-                });
+                payment -> subscriptionFailed(payment, failedAt));
     }
 
     /**
-     * 구독 청구 시도 실패, <b>재시도 상한을 넘겼다</b>(W5D1). 주기를 포기한다.
+     * 실패 결말 — 트랜잭션 안에서, 이 시도 행을 손에 쥔 채 정한다.
      *
-     * <p>{@link #applySubscriptionDeclined} 와 갈라둔 이유는 {@code BillingCycle
-     * #onRetriesExhausted} 참고 — 인자 하나가 시각과 포기 여부를 겸하지 않게 한다.
+     * <p>세는 시점이 <b>트랜잭션 안</b>인 게 중요하다. 밖에서 세어 시각을 인자로 받으면
+     * 세기와 반영 사이에 다른 시도가 끼어들 수 있고, 낙관적 락 재시도가 돌 때 낡은 셈을
+     * 그대로 다시 쓴다. 여기서 세면 재조회할 때마다 다시 센다.
      *
-     * <p>구독 해지로 이어질지는 여기서 정하지 않는다(W5D2 미결 — {@code Subscription#cancel}
-     * javadoc 의 "해지 사유 미구분"과 같은 자리).
+     * <p>{@code countConcludedAttemptsExcluding} 를 쓰는 이유는 그 메서드 javadoc 참고 —
+     * 웹훅은 이미 {@code UNKNOWN} 인 시도에 도착할 수 있어서, 이번 시도를 빼고 세지 않으면
+     * 한 번을 두 번 센다.
      */
-    public TransitionResult applySubscriptionExhausted(UUID merchantPaymentId, String pgTransactionId) {
-        return dispatch(merchantPaymentId, pgTransactionId,
-                Payment::onDeclined,
-                payment -> {
-                    if (payment.getBillingCycle().onRetriesExhausted()
-                            == SubscriptionTransitionResult.CONFLICT) {
-                        recordCycleAnomaly(payment);
-                    }
-                });
+    private void subscriptionFailed(Payment payment, OffsetDateTime failedAt) {
+        BillingCycle cycle = payment.getBillingCycle();
+        int concluded = paymentRepository
+                .countConcludedAttemptsExcluding(cycle.getId(), payment.getId()) + 1;
+
+        SubscriptionTransitionResult result = dunningPolicy.nextRetryAt(concluded, failedAt)
+                .map(cycle::onPaymentFailed)
+                .orElseGet(cycle::onRetriesExhausted);
+
+        if (result == SubscriptionTransitionResult.CONFLICT) {
+            recordCycleAnomaly(payment);
+        }
     }
 
     /** 거절 확정. 주문은 CREATED 로 남는다(미결제 쓸이·취소가 나중에 처리). */
@@ -166,6 +179,52 @@ public class PaymentTransitionService {
                 payment -> { /* 부수효과 없음 */ });
     }
 
+    /**
+     * 웹훅 승인(W5D3). <b>호출자가 결제의 종류를 모르는 유일한 경로다.</b>
+     *
+     * <h3>왜 형제 진입점이 아니라 여기서 고르나</h3>
+     * W5D1 은 주문 결제와 구독 청구를 <i>형제 진입점</i>으로 갈랐다 — 분기문 대신. 그건
+     * <b>자기가 무엇을 하는지 아는 호출자</b>를 위한 설계다. 동기 경로는 안다.
+     * <b>웹훅은 정의상 모른다</b>: PG 가 우리 도메인을 알 리 없으니 바디에 종류가 실려 오지
+     * 않고, 아는 건 {@code merchantPaymentId} 뿐이다.
+     *
+     * <p>모르는 호출자에게 알라고 요구하면 그 지식이 컨트롤러로 샌다(그리고 조회가 한 번 더
+     * 는다). {@code dispatch} 는 어차피 {@code payment} 를 읽으므로, <b>읽은 자리에서 고른다.</b>
+     *
+     * <h3>W5D1 이 남긴 구멍이 이 자리였다</h3>
+     * 어제까지 웹훅은 {@code applyApproved} 만 불렀고, 그 부수효과는
+     * {@code payment.getOrder().getItems()} 를 걷는다. 구독 청구는 {@code order_id} 가 NULL 이라
+     * <b>NPE 로 500 이 났다</b>. 그리고 {@code WebhookController} 는 {@code RuntimeException} 에
+     * 멱등키를 지우므로 PG 가 재전송하고, 영구 결함이라 <b>매번 다시 500</b> 이 났다 —
+     * 회수 실패가 아니라 무한 재전송이다. [실측 W5D3]
+     */
+    public TransitionResult applyApprovedFromWebhook(UUID merchantPaymentId, String pgTransactionId) {
+        return dispatchSelecting(merchantPaymentId, pgTransactionId, Payment::onApproved,
+                payment -> payment.isSubscriptionCharge()
+                        ? this::subscriptionApproved
+                        : this::orderApproved);
+    }
+
+    /**
+     * 웹훅 거절(W5D3). 승인과 같은 이유로 여기서 고른다.
+     *
+     * <p><b>구독 쪽은 대칭이 아니다.</b> 주문 결제의 거절은 부수효과가 없지만, 구독 청구의
+     * 실패는 <i>"언제 다시 걸 것인가"</i> 를 정해야 한다. 그 규칙을
+     * {@link #applySubscriptionFailure} 로 내린 게 W5D3 의 결정이고, 그래서 웹훅이
+     * 스케줄러 쪽 서비스를 부를 필요가 없다 — <b>결말 규칙은 한 곳</b>이고 두 경로가 같은 문을 쓴다.
+     *
+     * @param failedAt 웹훅이 도착한 시각을 실패 시각으로 본다. PG 가 실제로 거절한 시각은
+     *                 바디에 없다 — 백오프 기준이 배달 지연만큼 밀린다는 뜻이고, 간격이
+     *                 일 단위라 실질 영향이 없다고 보고 넘어간다(W5D3 이월)
+     */
+    public TransitionResult applyDeclinedFromWebhook(UUID merchantPaymentId, String pgTransactionId,
+                                                     OffsetDateTime failedAt) {
+        return dispatchSelecting(merchantPaymentId, pgTransactionId, Payment::onDeclined,
+                payment -> payment.isSubscriptionCharge()
+                        ? p -> subscriptionFailed(p, failedAt)
+                        : p -> { /* 주문 결제의 거절은 부수효과가 없다 */ });
+    }
+
     /** 타임아웃. PENDING → UNKNOWN. 동기 경로 전용이라 pgTransactionId 가 없다. */
     public TransitionResult applyTimedOut(UUID merchantPaymentId) {
         return dispatch(merchantPaymentId, null,
@@ -173,10 +232,25 @@ public class PaymentTransitionService {
                 payment -> { /* 부수효과 없음 */ });
     }
 
+    /** 부수효과가 호출 시점에 정해지는 경우(동기 경로 — 자기가 뭘 하는지 안다). */
     private TransitionResult dispatch(UUID merchantPaymentId,
                                       String pgTransactionId,
                                       Function<Payment, TransitionResult> transition,
                                       Consumer<Payment> onTransitioned) {
+        return dispatchSelecting(merchantPaymentId, pgTransactionId, transition, payment -> onTransitioned);
+    }
+
+    /**
+     * 부수효과를 <b>읽은 결제에서 고르는</b> 경우(웹훅 — 호출자가 종류를 모른다).
+     *
+     * <p>W5D1 이 부수효과를 {@code Consumer<Payment>} 로 파라미터화해 둔 덕에, seam 을
+     * <i>값</i>에서 <i>선택자</i>로 올리는 것만으로 웹훅 라우팅이 들어왔다 —
+     * 갈아끼울 자리가 설계에 이미 있었다(W4D1 §6 과 같은 성질).
+     */
+    private TransitionResult dispatchSelecting(UUID merchantPaymentId,
+                                               String pgTransactionId,
+                                               Function<Payment, TransitionResult> transition,
+                                               Function<Payment, Consumer<Payment>> effectFor) {
         for (int attempt = 1; ; attempt++) {
             try {
                 return txTemplate.execute(tx -> {
@@ -187,7 +261,7 @@ public class PaymentTransitionService {
                     boolean linkOk = payment.linkPgTransaction(pgTransactionId);
 
                     if (result == TransitionResult.TRANSITIONED) {
-                        onTransitioned.accept(payment);
+                        effectFor.apply(payment).accept(payment);
                     }
                     if (result == TransitionResult.CONFLICT || !linkOk) {
                         recordAnomaly(payment, result, linkOk);

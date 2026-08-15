@@ -77,6 +77,32 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
     int countConcludedAttempts(@Param("billingCycleId") Long billingCycleId);
 
     /**
+     * 위와 같되 <b>지금 결말을 내려는 시도 한 건을 뺀다</b>(W5D3).
+     *
+     * <h3>왜 갈랐나 — {@code +1} 이 어긋나는 자리가 있다</h3>
+     * 실패 결말 처리는 <i>"이번을 포함해 몇 번째냐"</i> 를 묻기 때문에 세어진 값에 1 을 더한다.
+     * 그 계산은 <b>이번 시도가 아직 {@code PENDING} 일 때만</b> 맞다.
+     *
+     * <p>동기 경로(폴러)에서는 늘 맞았다 — 방금 만든 행이라 {@code PENDING} 이다. 그런데
+     * <b>웹훅 경로가 생기면서 깨진다</b>: 시도가 먼저 타임아웃돼 {@code UNKNOWN} 이 된 뒤
+     * 나중에 PG 가 거절 웹훅을 보내면, 그 행은 <b>이미 세어지는 쪽</b>에 있다.
+     * 거기에 {@code +1} 을 하면 시도 하나를 두 번 세고 사다리가 한 칸 짧아진다.
+     *
+     * <p>그래서 결말 처리는 언제나 이 메서드를 쓴다 — 이번 시도를 빼고 세어 {@code +1} 하면
+     * 현재 상태와 무관하게 항상 맞다. {@link #countConcludedAttempts} 는 <b>이번 시도가 없는</b>
+     * 자리(집기 직전 백스톱)에서만 쓴다.
+     */
+    @Query(value = """
+            SELECT count(*)
+              FROM payment
+             WHERE billing_cycle_id = :billingCycleId
+               AND status IN ('FAILED', 'UNKNOWN')
+               AND id <> :excludePaymentId
+            """, nativeQuery = true)
+    int countConcludedAttemptsExcluding(@Param("billingCycleId") Long billingCycleId,
+                                        @Param("excludePaymentId") Long excludePaymentId);
+
+    /**
      * 환불 금액을 원자적으로 <b>예약</b>한다(W2D4, 개명 W3D4). <b>판정과 실행이 한 문장이다</b> —
      * 반환된 영향 행 수가 곧 "환불 요청을 받아주는가"의 답이다.
      *
