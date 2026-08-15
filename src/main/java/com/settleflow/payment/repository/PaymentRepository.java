@@ -46,6 +46,37 @@ public interface PaymentRepository extends JpaRepository<Payment, Long> {
     List<Payment> findPaidInRange(@Param("from") OffsetDateTime from, @Param("to") OffsetDateTime to);
 
     /**
+     * 이 주기에서 <b>결말이 난</b> 청구 시도 수(W5D2). {@code DunningPolicy} 의 정의역이다.
+     *
+     * <h3>왜 UNKNOWN 을 세나</h3>
+     * {@code FAILED} 만 세면 <b>타임아웃 시도가 공짜가 된다</b> — PG 가 느린 동안 시도 수가
+     * 안 늘어 재시도가 줄지 않는다. W4D5 가 소비자 javadoc 에서 <i>"무한 재시도"</i> 를 찾아낸
+     * 그 모양을 우리 손으로 만드는 셈이다.
+     *
+     * <p>대가는 있다: {@code UNKNOWN} 이 나중에 {@code PAID} 로 풀리면 이 셈은 틀렸던 게 된다.
+     * 그 대가가 갈 자리는 이미 있다 — 상한 초과로 {@code ABANDONED} 된 주기에 성공이 도착하면
+     * {@code BillingCycle.onPaymentSucceeded} 가 {@code CONFLICT} 를 낸다. 돈은
+     * {@code payment} 행에 {@code PAID} 로 남고 어긋남만 기록된다(W1D1: 지우개가 아니라 빨간 펜).
+     *
+     * <h3>PENDING 은 안 센다 — 그리고 그게 한 칸 어긋나는 자리다</h3>
+     * 진행 중인 시도는 결말이 아니므로 뺀다. 그래서 <b>실패 통보를 반영하기 직전에 이걸 부르면
+     * 방금 실패한 그 시도가 아직 {@code PENDING} 이라 안 세어진다</b> — 호출부가 +1 해야 한다
+     * ({@code SubscriptionChargeService.concludeFailure}).
+     *
+     * <p>결말 전에 프로세스가 죽으면 {@code PENDING} 행이 영영 남아 이 셈에 안 잡힌다.
+     * 그것만으로 시도가 무한해지지는 않는다 — 시도를 걸기 직전에도 상한을 보기 때문이다
+     * ({@code DunningPolicy.hasRetryLeft}). 다만 <b>그 고아 행이 쌓이는 것 자체는 안 치운다</b>
+     * (W5D2 이월).
+     */
+    @Query(value = """
+            SELECT count(*)
+              FROM payment
+             WHERE billing_cycle_id = :billingCycleId
+               AND status IN ('FAILED', 'UNKNOWN')
+            """, nativeQuery = true)
+    int countConcludedAttempts(@Param("billingCycleId") Long billingCycleId);
+
+    /**
      * 환불 금액을 원자적으로 <b>예약</b>한다(W2D4, 개명 W3D4). <b>판정과 실행이 한 문장이다</b> —
      * 반환된 영향 행 수가 곧 "환불 요청을 받아주는가"의 답이다.
      *
