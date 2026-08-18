@@ -181,6 +181,20 @@ public class SubscriptionChargeService {
      * {@code DunningScheduler} 가 오래된 미결 시도를 센다.
      *
      * <p>{@code null} 반환은 "이 주기는 이제 청구하지 않는다"는 뜻이다.
+     *
+     * <h3>★ 아래 두 분기의 순서가 백스톱의 생사를 가른다 (W5D5)</h3>
+     * 재전송 분기가 <b>상한 판정보다 앞</b>에 있다. 그래서 결말난 시도가 이미 4개인 주기가
+     * 다시 집혀도 백스톱까지 가지 않는다 — [실측] 세 경로(사다리 소진 · 4번째 타임아웃 뒤
+     * 재집기 · 웹훅이 미결을 닫음) 전부 <b>백스톱 발화 0회</b>다.
+     *
+     * <p><b>그래도 백스톱을 지우면 안 된다.</b> 음성대조군 D 가 갈랐다: 이 재전송 분기를
+     * 걷어내자 <b>백스톱이 그 자리에서 1회 발화</b>했다(주기가 {@code FAILED} → {@code ABANDONED}).
+     * 죽은 코드가 아니라 <b>이 분기에 딸린 안전장치</b>이고, 지키는 대상은 어떤 시나리오가 아니라
+     * <i>"미결을 재전송으로 흡수한다"</i>는 <b>전제 자체가 사라지는 회귀</b>다.
+     *
+     * <p>W5D4 가 이걸 <i>"마지막 벽"</i> 이라 부른 건 틀렸다(그 문서 §8 에 정정). 벽이라면 무언가가
+     * 거기 닿아야 하는데 닿는 게 없다. <b>순서를 바꾸거나 위 분기를 지우는 사람은 백스톱이
+     * 되살아난다는 걸 알고 해야 한다.</b>
      */
     private Attempt stageAttempt(Long cycleId) {
         BillingCycle cycle = billingCycleRepository.findById(cycleId).orElseThrow();
@@ -193,6 +207,9 @@ public class SubscriptionChargeService {
             return new Attempt(attempt.getMerchantPaymentId(), attempt.getAmount(), cycleId, true);
         }
 
+        // 백스톱. 오늘의 코드에서는 위 분기가 앞을 막아 여기 도달하지 않는다 —
+        // 그래서 이 줄을 지워도 red 를 낼 테스트가 없다(W5D5 대조군 B). 그럼에도 남기는
+        // 근거는 대조군 D 다: 위 재전송 분기가 사라지면 여기가 즉시 발화한다.
         int concluded = paymentRepository.countConcludedAttempts(cycleId);
         if (!policy.hasRetryLeft(concluded)) {
             abandon(cycle, concluded);
