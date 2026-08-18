@@ -35,6 +35,22 @@ public interface SubscriptionRepository extends JpaRepository<Subscription, Long
     List<Long> findBillingDue(@Param("today") LocalDate today, @Param("limit") int limit);
 
     /**
+     * 이 셀러에게 이미 활성 구독이 있나(W5D5).
+     *
+     * <p><b>이건 정합성 장치가 아니다.</b> 읽고 판단하고 쓰는 사이에 틈이 있어 동시 요청 둘이
+     * 여기를 함께 통과한다. 막는 것은 {@code uq_subscription_active_seller}(V13)이고, 이 조회는
+     * <b>친절한 409</b> 를 위한 것이다 — W1D2 가 <i>"조회 후 앱 판단"</i> 을 기각한 자리와 같은
+     * 모양인데, 여기서는 <b>둘 다 둔다</b>: 정상 경로는 예외 없이 거절하고, 경합은 인덱스가 잡는다.
+     */
+    @Query(value = """
+            SELECT EXISTS (SELECT 1
+                             FROM subscription
+                            WHERE seller_id = :sellerId
+                              AND status    = 'ACTIVE')
+            """, nativeQuery = true)
+    boolean existsActiveBySeller(@Param("sellerId") Long sellerId);
+
+    /**
      * 구독 시계를 <b>먼저 밀고 커밋한다</b> — P1 의 리스(W5D2 결정 8).
      *
      * <h3>왜 이게 배타성을 준다는 건가</h3>
