@@ -23,6 +23,78 @@ Java 21 · Spring Boot 4.1 · PostgreSQL · Redis · Flyway · JPA/Hibernate
 
 *(원본 `docs/img/architecture.svg`. PDF·슬라이드용 PNG 는 같은 폴더에 함께 둔다.)*
 
+<details>
+<summary><b>같은 그림의 Mermaid 버전</b> — 고칠 사람은 이쪽이 편하다</summary>
+
+<br>
+
+SVG 는 **좌표를 손으로 잡은 것**이라 PDF·슬라이드에 그대로 넣을 수 있고, Mermaid 는
+**자동 배치**라 구조를 바꾸기 쉽다. 둘은 같은 내용이므로 **한쪽을 고치면 다른 쪽도 고쳐야 한다.**
+
+```mermaid
+flowchart TB
+  ENTRY["HTTP 진입점
+    POST /orders · /subscriptions
+    POST /payments/:id/refunds
+    POST /webhooks/pg"]
+
+  GATE["웹훅 멱등 관문
+    Redis SETNX — 효율 장치"]
+
+  FSM["Payment 전이표
+    종착지 판정 = 정합성
+    부수효과 정확히 1회"]
+
+  DUN["Dunning 폴러 ×2
+    P1 구독 청구일 · P2 재시도 시각
+    리스(CAS)로 배타"]
+
+  PG(["PG (외부)
+    승인·환불 동기 호출 / 웹훅 / 정산 리포트
+    차단기 2개로 격리"])
+
+  LED["복식부기 장부
+    journal + ledger_entry (append-only)
+    Σ차변 = Σ대변 — DB 가 강제"]
+
+  OUT["아웃박스
+    장부와 같은 tx → Kafka (환불 Saga)"]
+
+  SET["정산 배치
+    Quartz cron 02:00 KST
+    셀러×날짜 net 확정"]
+
+  REC["대사 (2축)
+    내부: 장부 ↔ 정산
+    외부: 우리 ↔ PG 리포트 (건별)"]
+
+  OBS[/"관측
+    Actuator → Prometheus → Grafana
+    스크레이프마다 DB 에서 재구성"/]
+
+  ENTRY -->|웹훅| GATE
+  ENTRY -->|주문 · 환불 · 구독| FSM
+  GATE -->|뚫려도 여기서 막힌다| FSM
+  FSM <-->|동기 호출 / 통보| PG
+  DUN -->|구독 청구 · 재전송| FSM
+  FSM -->|확정일 때만| LED
+  LED --> OUT
+  LED --> SET
+  SET --> REC
+  LED -. 원천을 바꿔 재구성 .-> REC
+  PG -. 정산 리포트 .-> REC
+  FSM -.-> OBS
+  LED -.-> OBS
+  SET -.-> OBS
+
+  classDef guard fill:#fff5f5,stroke:#cf222e,stroke-width:2px,color:#1f2328
+  classDef ext fill:#f6f8fa,stroke:#57606a,stroke-dasharray:5 3
+  class GATE,FSM,DUN guard
+  class PG,OBS ext
+```
+
+</details>
+
 ## 아키텍처 — 한 주문이 흐르는 길
 
 ```
