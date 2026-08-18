@@ -1,5 +1,6 @@
 package com.settleflow.support;
 
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -87,6 +88,11 @@ public abstract class IntegrationTestSupport {
         // 서비스를 직접 부르고, "리스너가 실제로 배선됐는가"만 별도 케이스에서 컨테이너를 손으로
         // 켜서 확인한다(RefundSagaTest).
         registry.add("spring.kafka.listener.auto-startup", () -> "false");
+        // 같은 이유로 Dunning 폴러도 끈다(W5D2). 켜두면 P1/P2 가 테스트와 <b>동시에</b> PG 를 부르고
+        // 주기·장부를 써서, 단언이 자기가 만든 상태가 아니라 폴러가 남긴 상태를 재게 된다.
+        // 테스트는 DunningScheduler.runBillingDue(today) / runRetryDue(now) 를 직접 부른다 —
+        // 시각을 인자로 받으므로 "1일 뒤"를 기다리지 않고 결정적으로 검증할 수 있다.
+        registry.add("settleflow.dunning.scheduler.enabled", () -> "false");
     }
 
     protected static String kafkaBootstrapServers() {
@@ -95,6 +101,29 @@ public abstract class IntegrationTestSupport {
 
     @Autowired private EntityManager em;
     @Autowired private PlatformTransactionManager cleanupTxManager;
+    @Autowired private CircuitBreakerRegistry cleanupCircuitBreakerRegistry;
+
+    /**
+     * 회로 상태를 매 테스트 전에 되돌린다(W5D2 에서 추가).
+     *
+     * <p><b>{@link #cleanDatabase} 만으로는 격리가 안 됐다.</b> 회로는 DB 가 아니라 스프링
+     * 컨텍스트에 사는데 컨텍스트는 클래스를 넘어 캐시되므로, 앞 테스트가 낸 타임아웃이
+     * {@code pg-approve} 를 열어둔 채 다음 테스트로 넘어간다. 그러면 승인이 PG 에 닿지도 않고
+     * {@code CallNotPermittedException} 으로 되돌아와 <b>정상 경로가 실패로 확정된다</b>.
+     *
+     * <p>W5D2 통합 테스트가 타임아웃을 15건 넘게 내면서 실제로 드러났다 —
+     * 성공 경로 단언이 {@code expected "PAID" but was "FAILED"} 로 깨졌고, 원인은 그 테스트가
+     * 아니라 <b>앞선 테스트들</b>이었다. W4 회고 §4-2(<i>"재는 자와 재이는 것"</i>)와 같은 축이고,
+     * 이번에 스위트가 물려준 건 데이터가 아니라 <b>회로</b>다.
+     *
+     * <p>{@code PgCircuitBreakerTest} 가 자기 클래스에서 하던 초기화를 여기로 올렸다 —
+     * 회로를 흔드는 테스트가 그 클래스 하나가 아니게 됐기 때문이다.
+     */
+    @BeforeEach
+    void resetCircuitBreakers() {
+        cleanupCircuitBreakerRegistry.circuitBreaker("pg-approve").reset();
+        cleanupCircuitBreakerRegistry.circuitBreaker("pg-refund").reset();
+    }
 
     /**
      * 컨테이너가 스위트 내내 살아 있으므로(싱글턴) 데이터가 클래스·테스트 간에 남는다.
@@ -114,7 +143,10 @@ public abstract class IntegrationTestSupport {
             List<String> tablesChildFirst = List.of(
                     "discrepancy_observation", "reconciliation_run",
                     "settlement", "settlement_pending", "outbox", "ledger_entry", "refund",
-                    "payment", "order_item", "orders", "journal", "product", "seller");
+                    // payment 는 billing_cycle 을 참조하고(V12 배타적 아크) billing_cycle 은
+                    // subscription 을, subscription 은 seller 를 참조한다 — 이 순서를 지킨다.
+                    "payment", "billing_cycle", "subscription",
+                    "order_item", "orders", "journal", "product", "seller");
             tablesChildFirst.forEach(t ->
                     em.createNativeQuery("DELETE FROM " + t).executeUpdate());
         });

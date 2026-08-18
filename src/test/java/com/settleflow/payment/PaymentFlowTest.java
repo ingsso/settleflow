@@ -129,7 +129,9 @@ class PaymentFlowTest extends IntegrationTestSupport {
         System.out.printf("[실측] 같은 eventId %d개 동시 → HTTP200 %d개, 최종 status=%s version=%d%n",
                 n, ok, p.getStatus(), p.getVersion());
 
-        verify(transitions, times(1)).applyApproved(eq(mpid), any());   // SETNX 관문: 1건만 통과
+        // W5D3 에서 웹훅 진입점이 applyApprovedFromWebhook 으로 바뀌었다 — 웹훅은 결제의
+        // 종류(주문/구독)를 모르므로 읽은 자리에서 부수효과를 고른다. 관문 성질은 그대로다.
+        verify(transitions, times(1)).applyApprovedFromWebhook(eq(mpid), any());   // SETNX 관문: 1건만 통과
         assertThat(p.getStatus()).isEqualTo(PaymentStatus.PAID);
         assertThat(p.getVersion()).isEqualTo(1L);                       // 실제 전이 1회
     }
@@ -151,7 +153,7 @@ class PaymentFlowTest extends IntegrationTestSupport {
         System.out.printf("[실측:음성대조군A] 다른 eventId %d개 동시 → HTTP200 %d개, 최종 status=%s version=%d%n",
                 n, ok, p.getStatus(), p.getVersion());
 
-        verify(transitions, times(n)).applyApproved(eq(mpid), any());   // 관문 못 막음: N건 다 통과
+        verify(transitions, times(n)).applyApprovedFromWebhook(eq(mpid), any());   // 관문 못 막음: N건 다 통과
         assertThat(p.getStatus()).isEqualTo(PaymentStatus.PAID);
         assertThat(p.getVersion()).isEqualTo(1L);                       // 그래도 backbone이 1회로 수렴
     }
@@ -167,7 +169,7 @@ class PaymentFlowTest extends IntegrationTestSupport {
             var r = (TransitionResult) inv.callRealMethod();
             if (r == TransitionResult.TRANSITIONED) transitioned.incrementAndGet();
             return r;
-        }).when(transitions).applyApproved(any(), any());
+        }).when(transitions).applyApprovedFromWebhook(any(), any());
 
         int n = 20;
         int ok = blast(n, i -> postWebhook("evt-" + i, PgEventType.APPROVED, mpid, "pg_tx_4", 10_000L));

@@ -44,14 +44,25 @@
 // Spring Boot 4용 공식 스타터 아직 없어서 spring-boot3 아티팩트 그대로 사용, 호환성 재확인 필요 (Week 4)
 implementation 'io.github.resilience4j:resilience4j-spring-boot3:2.2.0'
 
-// Week 5 정기결제(Dunning) 재시도 스케줄용 — @Scheduled 대신 Quartz로 결정
+// Quartz — 도입 근거는 W5D2 에서 폐기됐고, 실제 사용처는 W3D1 아웃박스 릴레이다(아래 참고)
 implementation 'org.springframework.boot:spring-boot-starter-quartz'
 ```
 
-### Quartz 채택 이유 (vs `@Scheduled`)
+### ~~Quartz 채택 이유 (vs `@Scheduled`)~~ — **W5D2 에서 폐기**
+
+원래 근거는 이랬다:
+
 - `@Scheduled`는 고정 주기(fixedDelay/cron)에는 적합하지만, "결제 실패 시점 기준 1일 후 → 3일 후 → 7일 후"처럼 **이벤트마다 다른 시점에 트리거**해야 하는 동적 스케줄에는 부적합
-- Quartz는 Job/Trigger를 DB(`QRTZ_*` 테이블)에 영속화해서, 서버 재시작해도 예약된 재시도가 유지됨 — 결제 재시도처럼 유실되면 안 되는 스케줄에 적합
-- Week 5 DunningScheduler 설계 시: 결제 실패 이벤트 수신 → Quartz Job 동적 등록(재시도 시점 계산해서 트리거 설정) → Job 실행 시 재시도 + Idempotency-Key로 중복 방지 + CircuitBreaker OPEN이면 스킵하고 다음 트리거로 재예약
+- Quartz는 Job/Trigger를 DB(`QRTZ_*` 테이블)에 영속화해서, 서버 재시작해도 예약된 재시도가 유지됨
+- Week 5 DunningScheduler 설계 시: 결제 실패 이벤트 수신 → Quartz Job 동적 등록 → Job 실행 시 재시도
+
+**폐기 근거(W5D2)**: 둘째 항목은 W5D1 이 **다른 방법으로 이미 충족했다** — `billing_cycle.next_retry_at` 이 *행에 있는 사실*이라 재시작과 무관하다. 그 상태에서 Quartz 트리거를 얹으면 *"다음 시도는 언제인가"* 의 원천이 **주기 행과 QRTZ 트리거 둘**이 되고, 시계가 둘이 되는 대가가 동적 트리거의 이득보다 크다.
+
+물증은 스키마에 있다: W5D1 이 깔아둔 `idx_subscription_due`(V12:133)와 `idx_billing_cycle_retry_due`(V12:218)는 **둘 다 폴링 조회를 위한 부분 인덱스**다. Quartz 를 골랐으면 둘 다 죽은 인덱스가 된다.
+
+폴링으로 잃는 건 정밀도인데 간격이 1일·3일·7일이라 뜻이 없고, 대신 **트리거 발화 1회 보증**을 잃는다 — 그건 리스(CAS)로 갚았다. → [W5D2](week5/W5D2_재시도_스케줄러.md)
+
+> **의존성은 남는다.** Quartz 는 W3D1 아웃박스 릴레이가 쓰고 있다(`OutboxRelayConfig`·`OutboxRelayJob`). 위 근거가 거짓이 된 것이지 라이브러리가 놀고 있는 게 아니다.
 
 ---
 

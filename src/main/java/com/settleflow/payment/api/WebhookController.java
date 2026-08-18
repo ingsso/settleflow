@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Duration;
+import java.time.OffsetDateTime;
 
 /**
  * PG 웹훅 수신 + 멱등 처리(W1D4 설계 ②).
@@ -79,10 +80,21 @@ public class WebhookController {
         return ResponseEntity.ok().build();
     }
 
+    /**
+     * <b>종류를 안 가른다</b>(W5D3). 주문 결제인지 구독 청구인지는 {@code merchantPaymentId} 로
+     * 행을 읽어야 알 수 있고, 그 읽기는 전이 서비스가 이미 한다 — 여기서 또 읽으면 조회가
+     * 두 번이 되고 도메인 지식이 컨트롤러로 샌다.
+     *
+     * <p>W5D2 까지 여기가 {@code applyApproved} 를 무조건 불렀고, 구독 청구 웹훅이 오면
+     * {@code payment.getOrder()} 가 NULL 이라 NPE → 500 이었다. 그리고 위 {@code catch} 가
+     * 멱등키를 지우므로 PG 가 재전송했고, <b>영구 결함이라 매번 다시 500</b> 이었다.
+     */
     private void dispatch(PgWebhookRequest req) {
         switch (req.eventType()) {
-            case APPROVED -> transitionService.applyApproved(req.merchantPaymentId(), req.pgTransactionId());
-            case DECLINED -> transitionService.applyDeclined(req.merchantPaymentId(), req.pgTransactionId());
+            case APPROVED -> transitionService.applyApprovedFromWebhook(
+                    req.merchantPaymentId(), req.pgTransactionId());
+            case DECLINED -> transitionService.applyDeclinedFromWebhook(
+                    req.merchantPaymentId(), req.pgTransactionId(), OffsetDateTime.now());
         }
     }
 }
