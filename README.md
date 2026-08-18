@@ -15,6 +15,14 @@ Java 21 · Spring Boot 4.1 · PostgreSQL · Redis · Flyway · JPA/Hibernate
 
 ---
 
+## 아키텍처 — 전체 구성
+
+![SettleFlow 아키텍처](docs/img/architecture.svg)
+
+**붉은 자리 셋이 이 프로젝트의 주제다** — 돈이 두 번 나가는 것을 막는 층. 웹훅은 *같은 사실이 두 번 통보되는* 것이라 **전이표의 종착지 판정**이 막고(Redis SETNX 는 효율 장치라 뚫려도 된다), 재시도는 *우리가 PG 에 두 번 거는* 것이라 — 롤백은 우리 DB 만 되돌리므로 — **돈이 나가기 전에 리스(CAS)로** 갈라야 한다.
+
+*(원본 `docs/img/architecture.svg`. PDF·슬라이드용 PNG 는 같은 폴더에 함께 둔다.)*
+
 ## 아키텍처 — 한 주문이 흐르는 길
 
 ```

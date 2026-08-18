@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="600" viewBox="0 0 980 600" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrowAccent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#cf222e"/>
+    </marker>
+    <marker id="arrowMuted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#57606a"/>
+    </marker>
+  </defs>
+
+  <rect width="980" height="600" fill="#ffffff"/>
+
+  <text x="30" y="40" font-size="19" font-weight="700" fill="#1f2328">SettleFlow — 아키텍처</text>
+  <text x="30" y="62" font-size="12.5" fill="#57606a">주문·결제 → 복식부기 장부 → 정산·대사, 그리고 정기결제 재시도(Dunning)</text>
+
+  <!-- 범례 -->
+  <rect x="726" y="28" width="14" height="10" rx="2" fill="#fff5f5" stroke="#cf222e" stroke-width="1.4"/>
+  <text x="746" y="37" font-size="11" fill="#57606a">돈이 두 번 나가는 것을 막는 자리</text>
+
+  <!-- ── HTTP 진입점 ── -->
+  <rect x="30" y="92" width="196" height="126" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.3"/>
+  <text x="46" y="114" font-size="13" font-weight="600" fill="#1f2328">HTTP 진입점</text>
+  <g font-size="11" fill="#424a53" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">
+    <text x="46" y="136">POST /orders</text>
+    <text x="46" y="154">POST /subscriptions</text>
+    <text x="46" y="172">POST /payments/{id}/refunds</text>
+    <text x="46" y="190">POST /webhooks/pg</text>
+  </g>
+  <text x="46" y="209" font-size="10.5" fill="#57606a">웹훅만 항상 200</text>
+
+  <!-- ── 멱등 관문 ── -->
+  <rect x="272" y="92" width="196" height="58" rx="8" fill="#fff5f5" stroke="#cf222e" stroke-width="1.5"/>
+  <text x="288" y="114" font-size="13" font-weight="600" fill="#1f2328">웹훅 멱등 관문</text>
+  <text x="288" y="133" font-size="11" fill="#57606a">Redis SETNX — 효율 장치</text>
+
+  <!-- ── 전이표 ── -->
+  <rect x="272" y="176" width="196" height="86" rx="8" fill="#fff5f5" stroke="#cf222e" stroke-width="1.5"/>
+  <text x="288" y="198" font-size="13" font-weight="600" fill="#1f2328">Payment 전이표</text>
+  <text x="288" y="217" font-size="11" fill="#57606a">종착지 판정 = 정합성</text>
+  <text x="288" y="234" font-size="11" fill="#57606a">부수효과 정확히 1회</text>
+  <text x="288" y="252" font-size="10" fill="#57606a" font-family="ui-monospace, SFMono-Regular, Consolas, monospace">PENDING·PAID·FAILED·UNKNOWN</text>
+
+  <!-- ── PG ── -->
+  <rect x="520" y="104" width="164" height="80" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.3" stroke-dasharray="5 3"/>
+  <text x="536" y="126" font-size="13" font-weight="600" fill="#1f2328">PG (외부)</text>
+  <text x="536" y="145" font-size="11" fill="#57606a">승인 · 환불 동기 호출</text>
+  <text x="536" y="162" font-size="11" fill="#57606a">웹훅 · 정산 리포트</text>
+  <text x="536" y="178" font-size="10.5" fill="#57606a">차단기 2개로 격리</text>
+
+  <!-- ── Dunning ── -->
+  <rect x="30" y="252" width="196" height="112" rx="8" fill="#fff5f5" stroke="#cf222e" stroke-width="1.5"/>
+  <text x="46" y="274" font-size="13" font-weight="600" fill="#1f2328">Dunning 폴러 ×2</text>
+  <text x="46" y="293" font-size="11" fill="#57606a">P1 구독 청구일(날짜)</text>
+  <text x="46" y="310" font-size="11" fill="#57606a">P2 재시도 시각(시각)</text>
+  <text x="46" y="331" font-size="11.5" font-weight="600" fill="#cf222e">리스(CAS)로 배타</text>
+  <text x="46" y="349" font-size="10.5" fill="#57606a">돈 나가기 전에 커밋</text>
+
+  <!-- ── 장부 ── -->
+  <rect x="272" y="300" width="196" height="96" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.3"/>
+  <text x="288" y="322" font-size="13" font-weight="600" fill="#1f2328">복식부기 장부</text>
+  <text x="288" y="341" font-size="11" fill="#57606a">journal + ledger_entry</text>
+  <text x="288" y="358" font-size="11" fill="#57606a">append-only</text>
+  <text x="288" y="378" font-size="11" font-weight="600" fill="#1f2328">Σ차변 = Σ대변 (DB 강제)</text>
+
+  <!-- ── 아웃박스 ── -->
+  <rect x="520" y="300" width="164" height="96" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.3"/>
+  <text x="536" y="322" font-size="13" font-weight="600" fill="#1f2328">아웃박스</text>
+  <text x="536" y="341" font-size="11" fill="#57606a">장부와 같은 tx</text>
+  <text x="536" y="358" font-size="11" fill="#57606a">→ Kafka (환불 Saga)</text>
+  <text x="536" y="378" font-size="10.5" fill="#57606a">진실은 하나</text>
+
+  <!-- ── 정산 배치 ── -->
+  <rect x="272" y="434" width="196" height="90" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.3"/>
+  <text x="288" y="456" font-size="13" font-weight="600" fill="#1f2328">정산 배치</text>
+  <text x="288" y="475" font-size="11" fill="#57606a">Quartz cron 02:00 KST</text>
+  <text x="288" y="492" font-size="11" fill="#57606a">셀러×날짜 net 확정</text>
+  <text x="288" y="510" font-size="10.5" fill="#57606a">표식으로 경계 구멍 차단</text>
+
+  <!-- ── 대사 ── -->
+  <rect x="520" y="434" width="240" height="90" rx="8" fill="#f6f8fa" stroke="#57606a" stroke-width="1.3"/>
+  <text x="536" y="456" font-size="13" font-weight="600" fill="#1f2328">대사 (2축)</text>
+  <text x="536" y="475" font-size="11" fill="#57606a">내부: 장부 ↔ 정산</text>
+  <text x="536" y="492" font-size="11" fill="#57606a">외부: 우리 ↔ PG 리포트 (건별)</text>
+  <text x="536" y="511" font-size="10.5" fill="#57606a">원천을 바꿔 재구성</text>
+
+  <!-- ── 관측 ── -->
+  <rect x="800" y="252" width="150" height="272" rx="8" fill="#f6f8fa" stroke="#8c959f" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <text x="816" y="274" font-size="13" font-weight="600" fill="#1f2328">관측</text>
+  <text x="816" y="295" font-size="11" fill="#57606a">Actuator</text>
+  <text x="816" y="312" font-size="11" fill="#57606a">→ Prometheus</text>
+  <text x="816" y="329" font-size="11" fill="#57606a">→ Grafana</text>
+  <text x="816" y="358" font-size="10.5" fill="#57606a">스크레이프마다</text>
+  <text x="816" y="374" font-size="10.5" fill="#57606a">DB 에서 재구성</text>
+  <text x="816" y="406" font-size="10.5" fill="#57606a">저장 경로를</text>
+  <text x="816" y="422" font-size="10.5" fill="#57606a">감시 대상에서 뗀다</text>
+  <text x="816" y="454" font-size="10.5" fill="#57606a">k6 부하 3종</text>
+  <text x="816" y="470" font-size="10.5" fill="#57606a">계기는 서버가 센 수</text>
+
+  <!-- ── 화살표 ── -->
+  <path d="M 226 128 L 266 121" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="230" y="112" font-size="10" fill="#57606a">웹훅</text>
+
+  <path d="M 226 178 L 266 200" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <path d="M 370 150 L 370 172" stroke="#cf222e" stroke-width="1.6" fill="none" marker-end="url(#arrowAccent)"/>
+  <text x="378" y="166" font-size="10" fill="#cf222e">뚫려도 여기서 막힌다</text>
+
+  <path d="M 468 208 L 516 168" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)" marker-start="url(#arrow)"/>
+  <text x="478" y="224" font-size="10" fill="#57606a">동기 호출 / 통보</text>
+
+  <path d="M 226 288 C 250 288 250 240 266 232" stroke="#cf222e" stroke-width="1.6" fill="none" marker-end="url(#arrowAccent)"/>
+  <text x="132" y="238" font-size="10" fill="#cf222e">구독 청구 · 재전송</text>
+
+  <path d="M 370 262 L 370 296" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <text x="378" y="284" font-size="10" fill="#57606a">확정일 때만</text>
+
+  <path d="M 468 348 L 516 348" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 370 396 L 370 430" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+  <path d="M 468 479 L 516 479" stroke="#57606a" stroke-width="1.4" fill="none" marker-end="url(#arrow)"/>
+
+  <path d="M 468 372 C 496 372 496 452 516 458" stroke="#8c959f" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#arrowMuted)"/>
+  <path d="M 646 184 C 704 260 704 400 664 430" stroke="#8c959f" stroke-width="1.2" fill="none" stroke-dasharray="4 3" marker-end="url(#arrowMuted)"/>
+  <text x="700" y="330" font-size="10" fill="#57606a">리포트</text>
+
+  <path d="M 760 470 L 796 440" stroke="#8c959f" stroke-width="1.1" fill="none" stroke-dasharray="3 3" marker-end="url(#arrowMuted)"/>
+  <path d="M 684 340 L 796 320" stroke="#8c959f" stroke-width="1.1" fill="none" stroke-dasharray="3 3" marker-end="url(#arrowMuted)"/>
+
+  <!-- 하단 노트 -->
+  <text x="30" y="558" font-size="11.5" fill="#57606a"><tspan font-weight="700" fill="#cf222e">붉은 자리 셋이 이 프로젝트의 주제다.</tspan> 웹훅은 <tspan font-weight="600">같은 사실이 두 번 통보되는</tspan> 것이라 전이표가 막지만,</text>
+  <text x="30" y="578" font-size="11.5" fill="#57606a">재시도는 <tspan font-weight="600">우리가 PG 에 두 번 거는</tspan> 것이다 — 롤백은 우리 DB 만 되돌리므로 <tspan font-weight="600">돈이 나가기 전에</tspan> 리스로 갈라야 한다.</text>
+</svg>

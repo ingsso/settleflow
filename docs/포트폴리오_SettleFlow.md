@@ -37,6 +37,13 @@ Micrometer + Prometheus + Grafana(관측) · k6(부하) · Testcontainers(통합
 
 ## 아키텍처
 
+![SettleFlow 아키텍처](img/architecture.svg)
+
+*(PDF·슬라이드에 넣을 때는 `docs/img/architecture.png` 을 쓴다.)*
+
+<details>
+<summary>텍스트 버전</summary>
+
 ```
                     ┌──────────── PG(외부) ────────────┐
                     │  승인/환불 동기 호출     웹훅 통보  │
@@ -61,6 +68,8 @@ Micrometer + Prometheus + Grafana(관측) · k6(부하) · Testcontainers(통합
 
    Dunning 폴러 ×2 (구독 청구 / 재시도) — 리스(CAS)로 인스턴스 간 배타성
 ```
+
+</details>
 
 ---
 
