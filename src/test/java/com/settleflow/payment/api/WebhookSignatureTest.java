@@ -18,6 +18,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -168,8 +169,30 @@ class WebhookSignatureTest extends IntegrationTestSupport {
 
         String expected = "0592d050fe5c5de14b7b8e663ab1a9c46b31b53a2b999c54c0c94728bd89eb41";
         assertThat(v.sign(ts, body)).isEqualTo(expected);
-        assertThat(v.verify(ts, expected, body)).contains(VerifiedKey.CURRENT);
-        assertThat(v.verify(ts, expected.toUpperCase(), body)).contains(VerifiedKey.CURRENT);   // hex 대소문자는 같은 바이트
+        byte[] raw = body.getBytes(StandardCharsets.UTF_8);
+        assertThat(v.verify(ts, expected, raw)).contains(VerifiedKey.CURRENT);
+        assertThat(v.verify(ts, expected.toUpperCase(), raw)).contains(VerifiedKey.CURRENT);   // hex 대소문자는 같은 바이트
+    }
+
+    /**
+     * 서명은 <b>받은 바이트</b>에 대해 검증해야 한다. 바디를 문자열로 받으면 Spring 이 Content-Type 의 문자셋으로
+     * 풀고, 서명 계산은 그걸 UTF-8 로 다시 인코딩한다 — 선언 문자셋이 실제 바이트와 다르면 왕복이 원본을 복원하지
+     * 못해 <b>정상 서명이 401</b> 이 된다. 재전송해도 같은 바이트라 영구히 401 이다(W6D2 §9).
+     *
+     * <p>PG 가 한글 필드를 추가하고 헤더에 {@code charset=ISO-8859-1} 을 잘못 적은 경우. 서명은 PG 가 실제로 보낸
+     * UTF-8 바이트 기준이다. 모르는 필드({@code storeName})는 매퍼가 무시하므로 서명 검증까지 간다.
+     */
+    @Test
+    void 선언_문자셋이_바이트와_달라도_받은_바이트_그대로_검증한다_ISO_8859_1() {
+        UUID mpid = createPendingPayment();
+        String body = bodyWithStoreName("evt-latin1", mpid, "한글상점");
+        String ts = now();
+
+        HttpResponse<String> res = postWebhookRaw(body.getBytes(StandardCharsets.UTF_8),
+                "application/json; charset=ISO-8859-1", ts, verifier.sign(ts, body));
+
+        assertThat(res.statusCode()).isEqualTo(200);
+        assertThat(status(mpid)).isEqualTo(PaymentStatus.PAID);
     }
 
     /**
@@ -204,6 +227,13 @@ class WebhookSignatureTest extends IntegrationTestSupport {
                 "{\"eventId\":\"%s\",\"eventType\":\"APPROVED\",\"merchantPaymentId\":\"%s\","
                         + "\"pgTransactionId\":\"pg-tx-%s\",\"amount\":%d}",
                 eventId, mpid, eventId, amount);
+    }
+
+    private String bodyWithStoreName(String eventId, UUID mpid, String storeName) {
+        return String.format(
+                "{\"eventId\":\"%s\",\"eventType\":\"APPROVED\",\"merchantPaymentId\":\"%s\","
+                        + "\"pgTransactionId\":\"pg-tx-%s\",\"amount\":%d,\"storeName\":\"%s\"}",
+                eventId, mpid, eventId, AMOUNT, storeName);
     }
 
     private String now() {

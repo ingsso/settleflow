@@ -24,6 +24,7 @@ class WebhookSecretRotationTest {
     private static final long NOW = 1_700_000_000L;
     private static final String TS = Long.toString(NOW);
     private static final String BODY = "{\"eventId\":\"evt-rot\",\"amount\":10000}";
+    private static final byte[] BODY_BYTES = BODY.getBytes(StandardCharsets.UTF_8);
     private static final Clock FIXED = Clock.fixed(Instant.ofEpochSecond(NOW), ZoneOffset.UTC);
 
     private static final String NEW = "new-secret";
@@ -31,22 +32,22 @@ class WebhookSecretRotationTest {
 
     @Test
     void 현재키로_서명하면_CURRENT() {
-        assertThat(verifier(NEW, OLD).verify(TS, hmacHex(NEW), BODY)).contains(VerifiedKey.CURRENT);
+        assertThat(verifier(NEW, OLD).verify(TS, hmacHex(NEW), BODY_BYTES)).contains(VerifiedKey.CURRENT);
     }
 
     @Test
     void 교체기간엔_구키로_서명해도_PREVIOUS로_통과한다() {
-        assertThat(verifier(NEW, OLD).verify(TS, hmacHex(OLD), BODY)).contains(VerifiedKey.PREVIOUS);
+        assertThat(verifier(NEW, OLD).verify(TS, hmacHex(OLD), BODY_BYTES)).contains(VerifiedKey.PREVIOUS);
     }
 
     @Test
     void 교체가_끝나면_구키_서명은_실패한다() {
-        assertThat(verifier(NEW, "").verify(TS, hmacHex(OLD), BODY)).isEmpty();
+        assertThat(verifier(NEW, "").verify(TS, hmacHex(OLD), BODY_BYTES)).isEmpty();
     }
 
     @Test
     void 어느_쪽도_아닌_키는_실패한다() {
-        assertThat(verifier(NEW, OLD).verify(TS, hmacHex("other-secret"), BODY)).isEmpty();
+        assertThat(verifier(NEW, OLD).verify(TS, hmacHex("other-secret"), BODY_BYTES)).isEmpty();
     }
 
     /**
@@ -58,20 +59,20 @@ class WebhookSecretRotationTest {
      */
     @Test
     void 빈_구키는_키로_취급하지_않는다_틀린서명이_예외없이_실패한다() {
-        assertThat(verifier(NEW, "").verify(TS, hmacHex("other-secret"), BODY)).isEmpty();
-        assertThat(verifier(NEW, " ").verify(TS, hmacHex("other-secret"), BODY)).isEmpty();
-        assertThat(verifier(NEW, null).verify(TS, hmacHex("other-secret"), BODY)).isEmpty();
+        assertThat(verifier(NEW, "").verify(TS, hmacHex("other-secret"), BODY_BYTES)).isEmpty();
+        assertThat(verifier(NEW, " ").verify(TS, hmacHex("other-secret"), BODY_BYTES)).isEmpty();
+        assertThat(verifier(NEW, null).verify(TS, hmacHex("other-secret"), BODY_BYTES)).isEmpty();
     }
 
     /** 공백 구 키가 필터 없이 키가 되면, 공백 한 글자로 서명한 요청이 PREVIOUS 로 통과한다. */
     @Test
     void 공백_구키로는_서명이_통과하지_않는다() {
-        assertThat(verifier(NEW, " ").verify(TS, hmacHex(" "), BODY)).isEmpty();
+        assertThat(verifier(NEW, " ").verify(TS, hmacHex(" "), BODY_BYTES)).isEmpty();
     }
 
     @Test
     void 빈_구키여도_현재키는_그대로_통과한다() {
-        assertThat(verifier(NEW, " ").verify(TS, hmacHex(NEW), BODY)).contains(VerifiedKey.CURRENT);
+        assertThat(verifier(NEW, " ").verify(TS, hmacHex(NEW), BODY_BYTES)).contains(VerifiedKey.CURRENT);
     }
 
     @Test

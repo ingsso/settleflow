@@ -121,10 +121,20 @@ public abstract class IntegrationTestSupport {
 
     /** 헤더를 직접 고르는 버전. {@code null} 인 헤더는 안 붙인다(누락 케이스용). */
     protected HttpResponse<String> postWebhookRaw(String body, String timestamp, String signature) {
+        return postWebhookRaw(body.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                "application/json", timestamp, signature);
+    }
+
+    /**
+     * 바이트와 Content-Type 까지 고르는 버전. 서버가 받은 바이트를 문자열로 풀었다 다시 인코딩하는지
+     * (= 원본 바이트로 검증하지 않는지)를 재려면 바디와 선언 문자셋을 어긋나게 보낼 수 있어야 한다.
+     */
+    protected HttpResponse<String> postWebhookRaw(byte[] body, String contentType,
+                                                  String timestamp, String signature) {
         HttpRequest.Builder req = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + webhookPort + "/webhooks/pg"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(body));
+                .header("Content-Type", contentType)
+                .POST(HttpRequest.BodyPublishers.ofByteArray(body));
         if (timestamp != null) req.header("X-Timestamp", timestamp);
         if (signature != null) req.header("X-Signature", signature);
         try {

@@ -16,7 +16,9 @@ import java.util.Optional;
 /**
  * 웹훅 발신자 검증 — "요청이 진짜 PG 에서 왔는가".
  *
- * <p>서명 대상은 {@code timestamp + "." + 원본 바디}, HMAC-SHA256, 공유 시크릿.
+ * <p>서명 대상은 {@code timestamp + "." + 원본 바디 바이트}, HMAC-SHA256, 공유 시크릿.
+ * <b>바디는 받은 바이트 그대로</b>다 — 문자열로 풀었다 다시 인코딩하면 선언 문자셋이 실제 바이트와 다를 때
+ * 왕복이 원본을 복원하지 못해 정상 서명이 영구히 401 이 된다(W6D2 §9, {@code charset=ISO-8859-1} 실측).
  * <b>타임스탬프를 서명 대상에 넣는 이유</b>: 빼면 공격자가 옛날 요청의 시각 헤더만 바꿔 재사용한다.
  * 허용 오차(기본 5분) 안의 재전송은 여기가 아니라 {@code eventId} 멱등 처리가 막는다.
  *
@@ -75,7 +77,7 @@ public class WebhookSignatureVerifier {
     /**
      * @return 통과했으면 어느 키로 통과했는지, 실패면 비어 있음. 타임스탬프 검사는 키와 무관하므로 먼저 한다.
      */
-    public Optional<VerifiedKey> verify(String timestampHeader, String signatureHeader, String rawBody) {
+    public Optional<VerifiedKey> verify(String timestampHeader, String signatureHeader, byte[] rawBody) {
         if (timestampHeader == null || signatureHeader == null) return Optional.empty();
 
         long ts;
@@ -89,26 +91,30 @@ public class WebhookSignatureVerifier {
         try { actual = HexFormat.of().parseHex(signatureHeader); }
         catch (IllegalArgumentException e) { return Optional.empty(); }
 
-        String payload = timestampHeader + "." + rawBody;
-        if (MessageDigest.isEqual(hmac(current, payload), actual)) {
+        if (MessageDigest.isEqual(hmac(current, timestampHeader, rawBody), actual)) {
             return Optional.of(VerifiedKey.CURRENT);
         }
-        if (previous != null && MessageDigest.isEqual(hmac(previous, payload), actual)) {
+        if (previous != null && MessageDigest.isEqual(hmac(previous, timestampHeader, rawBody), actual)) {
             return Optional.of(VerifiedKey.PREVIOUS);
         }
         return Optional.empty();
     }
 
-    /** 테스트·k6 대조용. 프로덕션 경로에서는 안 쓴다. <b>항상 현재 키</b>로 서명한다. */
+    /**
+     * 테스트·k6 대조용. 프로덕션 경로에서는 안 쓴다. <b>항상 현재 키</b>로 서명한다.
+     * 바디 문자열은 UTF-8 바이트로 서명한다 — 보내는 쪽이 UTF-8 로 보낸다는 전제의 편의 함수다.
+     */
     public String sign(String timestamp, String rawBody) {
-        return HexFormat.of().formatHex(hmac(current, timestamp + "." + rawBody));
+        return HexFormat.of().formatHex(hmac(current, timestamp, rawBody.getBytes(StandardCharsets.UTF_8)));
     }
 
-    private byte[] hmac(byte[] key, String payload) {
+    /** {@code timestamp + "." + body} 를 이어 붙이지 않고 순서대로 흘려 넣는다 — 바디 바이트를 복사하지 않는다. */
+    private byte[] hmac(byte[] key, String timestamp, byte[] body) {
         try {
             Mac mac = Mac.getInstance(ALGORITHM);
             mac.init(new SecretKeySpec(key, ALGORITHM));
-            return mac.doFinal(payload.getBytes(StandardCharsets.UTF_8));
+            mac.update((timestamp + ".").getBytes(StandardCharsets.UTF_8));
+            return mac.doFinal(body);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException(e);
         }

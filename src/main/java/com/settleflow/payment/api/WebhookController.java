@@ -1,6 +1,5 @@
 package com.settleflow.payment.api;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
@@ -19,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.io.IOException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
 import java.util.Optional;
@@ -47,9 +47,11 @@ import java.util.Optional;
  * 멱등키를 선점하고, 나중에 온 진짜 통보가 "중복"으로 200 처리되어 <b>버려진다</b>. 위조가 결제 반영을
  * 막는 공격이 된다. 그래서 순서는 서명 → SETNX → 전이.
  *
- * <p><b>바디를 {@code String} 으로 받는다</b> — {@code @RequestBody PgWebhookRequest} 로 받으면 이미
+ * <p><b>바디를 {@code byte[]} 로 받는다</b> — {@code @RequestBody PgWebhookRequest} 로 받으면 이미
  * 파싱된 객체라 서명 대상인 원본을 잃는다(공백·필드 순서만 달라도 서명이 안 맞는다). 검증을 통과한
- * 뒤에야 파싱한다.
+ * 뒤에야 같은 바이트를 파싱한다.
+ * W6D1 엔 {@code String} 이었는데, 그러면 Spring 이 Content-Type 문자셋으로 풀고 서명은 UTF-8 로 다시
+ * 인코딩해서, 선언 문자셋이 실제 바이트와 다르면 정상 서명이 영구히 401 이었다(W6D2 §9 실측).
  *
  * <p><b>항상 200 OK</b>(서명을 통과한 요청에 한해) — 중복도, 없는 결제도 정상 응답이다. non-2xx 를 주면 PG 가 몇 시간
  * 재전송한다(W1D1 §4). "이미 처리했음"은 에러가 아니라 성공이다.
@@ -99,7 +101,7 @@ public class WebhookController {
     public ResponseEntity<Void> receive(
             @RequestHeader(value = "X-Timestamp", required = false) String timestamp,
             @RequestHeader(value = "X-Signature", required = false) String signature,
-            @RequestBody String rawBody) {
+            @RequestBody byte[] rawBody) {
 
         // ① 발신자 검증 — SETNX 보다 먼저. 401 은 멱등키를 남기지 않는다.
         Optional<VerifiedKey> verified = verifier.verify(timestamp, signature, rawBody);
@@ -138,12 +140,12 @@ public class WebhookController {
     }
 
     /** {@code @Valid} 가 하던 일을 직접 한다. 파싱 실패·제약 위반이면 {@code null}(→ 400). */
-    private PgWebhookRequest parseAndValidate(String rawBody) {
+    private PgWebhookRequest parseAndValidate(byte[] rawBody) {
         PgWebhookRequest req;
         try {
             req = objectMapper.readValue(rawBody, PgWebhookRequest.class);
-        } catch (JsonProcessingException e) {
-            log.warn("웹훅 바디 파싱 실패: {}", e.getOriginalMessage());
+        } catch (IOException e) {
+            log.warn("웹훅 바디 파싱 실패: {}", e.getMessage());
             return null;
         }
         if (req == null || !validator.validate(req).isEmpty()) {
