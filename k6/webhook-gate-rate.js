@@ -64,6 +64,7 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
+import { signedWebhookHeaders } from './lib/signed-webhook.js';
 
 const BASE = __ENV.BASE_URL || 'http://localhost:8080';
 // 이미 Redis 에 키가 있는 eventId 여야 한다. 없으면 첫 요청만 통과 경로를 타고
@@ -109,7 +110,7 @@ export default function () {
   });
 
   const res = http.post(`${BASE}/webhooks/pg`, payload, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: signedWebhookHeaders(payload),
     tags: { name: 'webhook' },
   });
 

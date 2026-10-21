@@ -36,6 +36,7 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
 import exec from 'k6/execution';
+import { signedWebhookHeaders } from './lib/signed-webhook.js';
 
 const BASE = __ENV.BASE_URL || 'http://localhost:8080';
 // 상품 id 는 seed.sql 이 마지막에 찍어준다. 기본값은 깨끗한 환경 기준이고, 다르면 env 로 준다.
@@ -103,7 +104,7 @@ export default function () {
 
   webhookSent.add(1);
   const res = http.post(`${BASE}/webhooks/pg`, payload, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: signedWebhookHeaders(payload),
     tags: { name: 'webhook' },
   });
 
