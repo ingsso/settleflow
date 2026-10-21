@@ -9,14 +9,10 @@ import com.settleflow.support.IntegrationTestSupport;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.LocalDate;
 import java.util.UUID;
@@ -38,10 +34,6 @@ class SubscriptionWebhookTest extends IntegrationTestSupport {
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
     @Autowired StringRedisTemplate redis;
-
-    @LocalServerPort int port;
-
-    private final HttpClient http = HttpClient.newHttpClient();
 
     private static final long AMOUNT_TIMEOUT = 30_222L;
 
@@ -163,16 +155,7 @@ class SubscriptionWebhookTest extends IntegrationTestSupport {
                 "{\"eventId\":\"%s\",\"eventType\":\"%s\",\"merchantPaymentId\":\"%s\","
                         + "\"pgTransactionId\":\"%s\",\"amount\":%d}",
                 eventId, type, mpid, pgTx, amount);
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/webhooks/pg"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-        try {
-            return http.send(req, HttpResponse.BodyHandlers.ofString());
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        return postSignedWebhook(json);
     }
 
     private long createProduct() {

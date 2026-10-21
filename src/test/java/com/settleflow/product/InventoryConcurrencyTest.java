@@ -31,7 +31,8 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * 원자적 조건부 UPDATE(WHERE stock >= :qty)만으로 초과 판매가 나지 않아야 한다.
  */
-@SpringBootTest
+// IntegrationTestSupport 밖이라 웹훅 시크릿(${WEBHOOK_SECRET})을 직접 준다 — 없으면 컨텍스트가 안 뜬다.
+@SpringBootTest(properties = "settleflow.webhook.secret=test-webhook-secret")
 @Testcontainers
 class InventoryConcurrencyTest {
 

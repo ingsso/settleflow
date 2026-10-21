@@ -17,15 +17,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
 import java.util.UUID;
@@ -83,9 +78,6 @@ class DunningBlindSpotTest extends IntegrationTestSupport {
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
 
-    @LocalServerPort int port;
-
-    private final HttpClient http = HttpClient.newHttpClient();
     private final AtomicInteger pgCalls = new AtomicInteger();
 
     private ListAppender<ILoggingEvent> chargeLog;
@@ -397,17 +389,7 @@ class DunningBlindSpotTest extends IntegrationTestSupport {
                 "{\"eventId\":\"%s\",\"eventType\":\"%s\",\"merchantPaymentId\":\"%s\","
                         + "\"pgTransactionId\":\"%s\",\"amount\":%d}",
                 eventId, type, mpid, "pg-tx-" + eventId, AMOUNT);
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/webhooks/pg"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-        try {
-            HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());
-            assertThat(res.statusCode()).isEqualTo(200);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        assertThat(postSignedWebhook(json).statusCode()).isEqualTo(200);
     }
 
     private String str(String sql) {

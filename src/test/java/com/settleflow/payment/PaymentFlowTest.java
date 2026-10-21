@@ -16,17 +16,12 @@ import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -63,9 +58,6 @@ class PaymentFlowTest extends IntegrationTestSupport {
 
     @MockitoSpyBean PaymentTransitionService transitions;
 
-    @LocalServerPort int port;
-
-    final HttpClient http = HttpClient.newHttpClient();
     TransactionTemplate tx;
 
     @BeforeEach
@@ -276,16 +268,7 @@ class PaymentFlowTest extends IntegrationTestSupport {
                 "{\"eventId\":\"%s\",\"eventType\":\"%s\",\"merchantPaymentId\":\"%s\","
                         + "\"pgTransactionId\":\"%s\",\"amount\":%d}",
                 eventId, type, mpid, pgTx, amount);
-        HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + port + "/webhooks/pg"))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(json))
-                .build();
-        try {
-            return http.send(req, HttpResponse.BodyHandlers.discarding()).statusCode();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        return postSignedWebhook(json).statusCode();
     }
 
     Payment reload(UUID mpid) {
