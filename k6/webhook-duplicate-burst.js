@@ -12,6 +12,7 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
+import { signedWebhookHeaders } from './lib/signed-webhook.js';
 
 const BASE = __ENV.BASE_URL || 'http://localhost:8080';
 // 타임아웃 매직금액 상품(10,222). seed.sql 이 id 를 찍어준다.
@@ -68,7 +69,7 @@ export default function (data) {
   });
 
   const res = http.post(`${BASE}/webhooks/pg`, payload, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: signedWebhookHeaders(payload),
     tags: { name: 'webhook' },
   });
 

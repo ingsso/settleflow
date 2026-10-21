@@ -46,6 +46,13 @@ spring:
 # max-interval 이 30s 인 이유는 회로가 아니라 컨슈머 쪽이다: 블로킹 재시도라 대기 중 컨슈머
 # 스레드가 멈추고, 한 번의 대기가 max.poll.interval.ms(기본 300s)를 넘으면 그룹에서 쫓겨난다.
 settleflow:
+  # 웹훅 발신자 검증(WebhookSignatureVerifier). 시크릿에 기본값을 두지 않는다 — 기본값이 있으면
+  # 운영에서 환경변수를 빠뜨려도 앱이 떠서 "아무나 아는 시크릿"으로 서명을 받는다. 없으면 기동 실패.
+  # 로컬 bootRun: PowerShell 에서 $env:WEBHOOK_SECRET = "..." 후 실행. 테스트는 IntegrationTestSupport 가 덮는다.
+  webhook:
+    secret: ${WEBHOOK_SECRET}
+    # 서명 시각과 서버 시각의 허용 차. 이 창 안의 재전송은 eventId 멱등 처리가 막는다.
+    tolerance-seconds: 300
   kafka:
     refund-retry:
       initial-interval: 2s

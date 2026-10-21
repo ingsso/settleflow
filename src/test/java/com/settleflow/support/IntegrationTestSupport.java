@@ -1,10 +1,12 @@
 package com.settleflow.support;
 
+import com.settleflow.payment.api.WebhookSignatureVerifier;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
@@ -15,6 +17,10 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.util.List;
 
 /**
@@ -93,6 +99,39 @@ public abstract class IntegrationTestSupport {
         // 테스트는 DunningScheduler.runBillingDue(today) / runRetryDue(now) 를 직접 부른다 —
         // 시각을 인자로 받으므로 "1일 뒤"를 기다리지 않고 결정적으로 검증할 수 있다.
         registry.add("settleflow.dunning.scheduler.enabled", () -> "false");
+        // 웹훅 서명 시크릿. 메인 yaml 은 ${WEBHOOK_SECRET} 이라 환경변수 없이는 컨텍스트가 안 뜬다.
+        registry.add("settleflow.webhook.secret", () -> TEST_WEBHOOK_SECRET);
+    }
+
+    protected static final String TEST_WEBHOOK_SECRET = "test-webhook-secret";
+
+    @LocalServerPort private int webhookPort;
+    @Autowired private WebhookSignatureVerifier webhookSigner;
+    private final HttpClient webhookHttp = HttpClient.newHttpClient();
+
+    /**
+     * 서명을 붙여 {@code POST /webhooks/pg} 를 쏜다. 서명 검증이 SETNX 앞에 생긴 뒤로 서명 없는 웹훅은
+     * 전부 401 이라, 웹훅을 직접 쏘는 테스트는 이걸 거친다. 서명은 앱이 쓰는 같은 검증기의
+     * {@code sign()} 으로 만든다 — 시각은 지금.
+     */
+    protected HttpResponse<String> postSignedWebhook(String body) {
+        String ts = Long.toString(java.time.Instant.now().getEpochSecond());
+        return postWebhookRaw(body, ts, webhookSigner.sign(ts, body));
+    }
+
+    /** 헤더를 직접 고르는 버전. {@code null} 인 헤더는 안 붙인다(누락 케이스용). */
+    protected HttpResponse<String> postWebhookRaw(String body, String timestamp, String signature) {
+        HttpRequest.Builder req = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + webhookPort + "/webhooks/pg"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body));
+        if (timestamp != null) req.header("X-Timestamp", timestamp);
+        if (signature != null) req.header("X-Signature", signature);
+        try {
+            return webhookHttp.send(req.build(), HttpResponse.BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     protected static String kafkaBootstrapServers() {

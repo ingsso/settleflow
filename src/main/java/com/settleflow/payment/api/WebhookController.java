@@ -1,14 +1,20 @@
 package com.settleflow.payment.api;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.settleflow.payment.service.PaymentNotFoundException;
 import com.settleflow.payment.service.PaymentTransitionService;
-import jakarta.validation.Valid;
+import jakarta.validation.Validator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -19,6 +25,10 @@ import java.time.OffsetDateTime;
  * PG 웹훅 수신 + 멱등 처리(W1D4 설계 ②).
  *
  * <pre>
+ *   서명 검증       ── 실패 ─→ 401  (멱등키를 안 남긴다)
+ *        │ 통과
+ *   파싱·검증       ── 실패 ─→ 400
+ *        │
  *   SETNX(eventId)  ── 실패(이미 있음) ─→ 200 OK  (중복. 아무 일도 안 함)
  *        │ 성공(처음)
  *        ▼
@@ -31,7 +41,15 @@ import java.time.OffsetDateTime;
  * lost update 가 안 생긴다. SETNX 는 fast-path 일 뿐이고, 그걸 빠져나온 중복은
  * 전이 서비스의 상태 가드+낙관적 락이 막는다("두 겹").
  *
- * <p><b>항상 200 OK</b> — 중복도, 없는 결제도 정상 응답이다. non-2xx 를 주면 PG 가 몇 시간
+ * <p><b>서명 검증을 SETNX 보다 먼저</b> — 뒤에 두면 위조 요청이 진짜 {@code eventId} 를 담아 먼저 도착해
+ * 멱등키를 선점하고, 나중에 온 진짜 통보가 "중복"으로 200 처리되어 <b>버려진다</b>. 위조가 결제 반영을
+ * 막는 공격이 된다. 그래서 순서는 서명 → SETNX → 전이.
+ *
+ * <p><b>바디를 {@code String} 으로 받는다</b> — {@code @RequestBody PgWebhookRequest} 로 받으면 이미
+ * 파싱된 객체라 서명 대상인 원본을 잃는다(공백·필드 순서만 달라도 서명이 안 맞는다). 검증을 통과한
+ * 뒤에야 파싱한다.
+ *
+ * <p><b>항상 200 OK</b>(서명을 통과한 요청에 한해) — 중복도, 없는 결제도 정상 응답이다. non-2xx 를 주면 PG 가 몇 시간
  * 재전송한다(W1D1 §4). "이미 처리했음"은 에러가 아니라 성공이다.
  */
 @RestController
@@ -47,17 +65,48 @@ public class WebhookController {
      */
     private static final Duration DEDUP_TTL = Duration.ofHours(24);
 
+    /**
+     * {@code OutboxWriter} 와 같은 이유로 직접 만든다 — Boot 4 는 webmvc 만으론 ObjectMapper 빈을
+     * 구성하지 않는다. <b>모르는 필드는 무시한다</b>: 이전엔 {@code @RequestBody} 가 Spring 의 매퍼로
+     * 파싱해 PG 가 필드를 추가해도 통과했는데, 직접 만든 매퍼의 기본값(실패)을 그대로 두면 그 순간
+     * 모든 웹훅이 400 이 된다.
+     */
+    private final ObjectMapper objectMapper = JsonMapper.builder()
+            .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
+            .build();
+
     private final StringRedisTemplate redis;
     private final PaymentTransitionService transitionService;
+    private final WebhookSignatureVerifier verifier;
+    private final Validator validator;
 
     public WebhookController(StringRedisTemplate redis,
-                            PaymentTransitionService transitionService) {
+                            PaymentTransitionService transitionService,
+                            WebhookSignatureVerifier verifier,
+                            Validator validator) {
         this.redis = redis;
         this.transitionService = transitionService;
+        this.verifier = verifier;
+        this.validator = validator;
     }
 
     @PostMapping
-    public ResponseEntity<Void> receive(@Valid @RequestBody PgWebhookRequest req) {
+    public ResponseEntity<Void> receive(
+            @RequestHeader(value = "X-Timestamp", required = false) String timestamp,
+            @RequestHeader(value = "X-Signature", required = false) String signature,
+            @RequestBody String rawBody) {
+
+        // ① 발신자 검증 — SETNX 보다 먼저. 401 은 멱등키를 남기지 않는다.
+        if (!verifier.verify(timestamp, signature, rawBody)) {
+            log.warn("웹훅 서명 검증 실패");
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        PgWebhookRequest req = parseAndValidate(rawBody);
+        if (req == null) {
+            return ResponseEntity.badRequest().build();
+        }
+
         String key = "webhook:dedup:" + req.eventId();
 
         Boolean firstTime = redis.opsForValue().setIfAbsent(key, "1", DEDUP_TTL);
@@ -78,6 +127,22 @@ public class WebhookController {
         }
 
         return ResponseEntity.ok().build();
+    }
+
+    /** {@code @Valid} 가 하던 일을 직접 한다. 파싱 실패·제약 위반이면 {@code null}(→ 400). */
+    private PgWebhookRequest parseAndValidate(String rawBody) {
+        PgWebhookRequest req;
+        try {
+            req = objectMapper.readValue(rawBody, PgWebhookRequest.class);
+        } catch (JsonProcessingException e) {
+            log.warn("웹훅 바디 파싱 실패: {}", e.getOriginalMessage());
+            return null;
+        }
+        if (req == null || !validator.validate(req).isEmpty()) {
+            log.warn("웹훅 바디 제약 위반");
+            return null;
+        }
+        return req;
     }
 
     /**
