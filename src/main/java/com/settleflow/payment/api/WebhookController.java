@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.settleflow.observability.WebhookMetrics;
 import com.settleflow.payment.service.PaymentNotFoundException;
 import com.settleflow.payment.service.PaymentTransitionService;
 import jakarta.validation.Validator;
@@ -20,6 +21,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.Optional;
 
 /**
  * PG 웹훅 수신 + 멱등 처리(W1D4 설계 ②).
@@ -79,15 +81,18 @@ public class WebhookController {
     private final PaymentTransitionService transitionService;
     private final WebhookSignatureVerifier verifier;
     private final Validator validator;
+    private final WebhookMetrics metrics;
 
     public WebhookController(StringRedisTemplate redis,
                             PaymentTransitionService transitionService,
                             WebhookSignatureVerifier verifier,
-                            Validator validator) {
+                            Validator validator,
+                            WebhookMetrics metrics) {
         this.redis = redis;
         this.transitionService = transitionService;
         this.verifier = verifier;
         this.validator = validator;
+        this.metrics = metrics;
     }
 
     @PostMapping
@@ -97,10 +102,13 @@ public class WebhookController {
             @RequestBody String rawBody) {
 
         // ① 발신자 검증 — SETNX 보다 먼저. 401 은 멱등키를 남기지 않는다.
-        if (!verifier.verify(timestamp, signature, rawBody)) {
+        Optional<VerifiedKey> verified = verifier.verify(timestamp, signature, rawBody);
+        if (verified.isEmpty()) {
             log.warn("웹훅 서명 검증 실패");
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
         }
+        // 시크릿 교체 판단용. SETNX 앞에서 센다 — 중복 재전송도 "PG 가 아직 그 키를 쓴다"는 신호다.
+        metrics.webhookVerified(verified.get());
 
         PgWebhookRequest req = parseAndValidate(rawBody);
         if (req == null) {

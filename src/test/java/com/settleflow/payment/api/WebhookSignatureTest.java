@@ -7,6 +7,7 @@ import com.settleflow.payment.repository.PaymentRepository;
 import com.settleflow.product.domain.Product;
 import com.settleflow.seller.domain.Seller;
 import com.settleflow.support.IntegrationTestSupport;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.persistence.EntityManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,6 +55,7 @@ class WebhookSignatureTest extends IntegrationTestSupport {
     @Autowired EntityManager em;
     @Autowired PlatformTransactionManager txManager;
     @Autowired WebhookSignatureVerifier verifier;
+    @Autowired MeterRegistry meterRegistry;
 
     TransactionTemplate tx;
 
@@ -162,15 +164,40 @@ class WebhookSignatureTest extends IntegrationTestSupport {
         String ts = "1700000000";
         String body = "{\"eventId\":\"evt-1\",\"amount\":10000}";
         Clock fixed = Clock.fixed(Instant.ofEpochSecond(1_700_000_000L), ZoneOffset.UTC);
-        WebhookSignatureVerifier v = new WebhookSignatureVerifier(TEST_WEBHOOK_SECRET, 300, fixed);
+        WebhookSignatureVerifier v = new WebhookSignatureVerifier(TEST_WEBHOOK_SECRET, null, 300, fixed);
 
         String expected = "0592d050fe5c5de14b7b8e663ab1a9c46b31b53a2b999c54c0c94728bd89eb41";
         assertThat(v.sign(ts, body)).isEqualTo(expected);
-        assertThat(v.verify(ts, expected, body)).isTrue();
-        assertThat(v.verify(ts, expected.toUpperCase(), body)).isTrue();   // hex 대소문자는 같은 바이트
+        assertThat(v.verify(ts, expected, body)).contains(VerifiedKey.CURRENT);
+        assertThat(v.verify(ts, expected.toUpperCase(), body)).contains(VerifiedKey.CURRENT);   // hex 대소문자는 같은 바이트
+    }
+
+    /**
+     * 시크릿 교체 카운터의 배선. 키별 판정은 {@code WebhookSecretRotationTest} 가 보고, 여기선 컨트롤러가
+     * <b>통과한 키로 한 번 세고 401 은 안 센다</b>는 것만 본다. 테스트 앱엔 구 키가 없어 previous 는 늘 수 없다 —
+     * 그래도 시계열은 있어야 한다(0 과 "없음"을 가르려고 미리 등록했다).
+     */
+    @Test
+    void 서명_통과는_키별로_세고_401은_안_센다() {
+        UUID mpid = createPendingPayment();
+        double current0 = verifiedCount("current");
+        double previous0 = verifiedCount("previous");
+
+        String body = body("evt-metric", mpid, AMOUNT);
+        String ts = now();
+        postWebhookRaw(body, ts, new WebhookSignatureVerifier("not-the-secret", 300).sign(ts, body));
+        assertThat(verifiedCount("current")).isEqualTo(current0);
+
+        assertThat(postSignedWebhook(body).statusCode()).isEqualTo(200);
+        assertThat(verifiedCount("current")).isEqualTo(current0 + 1);
+        assertThat(verifiedCount("previous")).isEqualTo(previous0);
     }
 
     // ---------- helpers ----------
+
+    private double verifiedCount(String key) {
+        return meterRegistry.get("settleflow.webhook.signature.verified").tag("key", key).counter().count();
+    }
 
     private String body(String eventId, UUID mpid, long amount) {
         return String.format(

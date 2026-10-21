@@ -51,6 +51,10 @@ settleflow:
   # 로컬 bootRun: PowerShell 에서 $env:WEBHOOK_SECRET = "..." 후 실행. 테스트는 IntegrationTestSupport 가 덮는다.
   webhook:
     secret: ${WEBHOOK_SECRET}
+    # 시크릿 교체 기간에만 직전 키를 넣는다(검증 전용). 비어 있으면 현재 키만 허용.
+    # 여기는 기본값(빈 값)이 있어도 된다 — 빈 값은 "구 키 없음"이라 아무 키도 허용하지 않는다.
+    # 교체 순서·구 키 제거 시점은 WebhookMetrics javadoc 과 시크릿 교체 가이드 참조.
+    previous-secret: ${WEBHOOK_SECRET_PREVIOUS:}
     # 서명 시각과 서버 시각의 허용 차. 이 창 안의 재전송은 eventId 멱등 처리가 막는다.
     tolerance-seconds: 300
   kafka:
