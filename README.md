@@ -4,14 +4,15 @@
 
 주제 한 줄: **"돈과 재고는 두 번 세면 안 된다."** 웹훅은 중복으로 오고, 결제는 타임아웃 나고, 배치는 승인된 주문의 재고를 되돌리려 한다 — 이 세 자리에서 이중청구·이중판매가 나지 않도록 막는 게 이 프로젝트다.
 
-> ⚠️ 진행 중(Week 1 완료 시점). 아래 "구현 현황" 참조.
+> ~~⚠️ 진행 중(Week 1 완료 시점).~~ 5주 계획(Week 1~5) 완료. Week 6 은 계획 밖 보강(웹훅 서명 검증·시크릿 교체). 아래 "구현 현황" 참조.
 
 ---
 
 ## 스택
 
 Java 21 · Spring Boot 4.1 · PostgreSQL · Redis · Flyway · JPA/Hibernate
-(예정: Kafka, resilience4j, k6, Prometheus/Grafana — Week 2~4)
+· Kafka · resilience4j · Micrometer/Prometheus · Grafana · k6 · Testcontainers
+~~(예정: Kafka, resilience4j, k6, Prometheus/Grafana — Week 2~4)~~ → Week 3~4 에 전부 들어갔다.
 
 ---
 
@@ -165,7 +166,7 @@ DB 대조:
 | 멱등 가드 제거(음성대조군) | TRANSITIONED 20 (빨간불 확인) | W1D4 |
 | 환불 레이스(조건부 UPDATE) | 최종 잔액 정확 / 가드 제거 시 오염 | W1D2 |
 
-전체 테스트 스위트: **19건 통과** (failures=0, errors=0, skipped=0 — 2026-07-18 `./gradlew test --rerun-tasks` 재실행 확인).
+전체 테스트 스위트: ~~**19건 통과** (2026-07-18)~~ → **40클래스 / 188건 통과** (failures=0, errors=0, skipped=0 — 2026-10-21 `./gradlew test --rerun-tasks` 재실행, `build/test-results` XML 합산). 아래 STAR 끝의 *"스위트 N건"* 은 각 주 마감 시점 값이다.
 
 ---
 
@@ -173,8 +174,17 @@ DB 대조:
 
 **요구사항**: JDK 21, Docker (Desktop 실행 중)
 
-```bash
+웹훅 서명 시크릿을 **먼저** 넣어야 한다. 기본값을 일부러 안 뒀다 — 운영에서 환경변수를 빠뜨려도 앱이 떠서 *아무나 아는 시크릿*으로 서명을 받는 일을 막기 위해서다. 없으면 기동 실패.
+
+```powershell
+# PowerShell
+$env:WEBHOOK_SECRET = "local-dev-secret"
 ./gradlew bootRun
+```
+
+```bash
+# bash
+WEBHOOK_SECRET=local-dev-secret ./gradlew bootRun
 ```
 
 `bootRun`이 `compose.yaml`(postgres + redis)을 자동 기동하고 Flyway가 스키마를 만든다. 별도로 `docker compose up`을 칠 필요 없음.
@@ -219,8 +229,18 @@ curl -X POST http://localhost:8080/orders \
   - **대사** 두 축(장부↔정산 / 우리↔PG 리포트) — 배치와 **다른 원천**으로 재계산해 동어반복 회피
   - **증발 구멍 상환** — 귀속 축(`created_at`)과 진행 축(`settlement_pending`)을 분리 + `REPEATABLE READ`
   - **불일치 자동 플래그** — 상태 UPDATE 대신 관측 누적(append-only) + 실행 기록
-- [ ] Week 4 — 관측성 + 부하테스트(k6)
-- [ ] Week 5 — 정기결제 재시도(Dunning)
+- [x] **Week 4 — 관측성 + 부하테스트(k6)**
+  - PG 호출에 resilience4j **차단기** — 열린 동안은 *"안 보냈다"* 가 확실한 앎
+  - Prometheus + Grafana — 정산 배치·대사 관측
+  - k6 웹훅 중복 폭주 · 강제 종료 — 헤드라인을 HTTP 가 아니라 `journal` 증가분으로
+- [x] **Week 5 — 정기결제 재시도(Dunning)**
+  - 연체를 상태가 아니라 `billing_cycle` 행으로 — 되돌아오는 축(ABA)을 행으로 내림
+  - Quartz 폐기 → 폴링 + **리스(CAS)** — 돈이 나가기 전에 배타성을 커밋
+  - 결말 없는 시도는 새 청구가 아니라 **같은 키로 재전송**
+- [x] **Week 6 — 웹훅 발신자 검증** *(5주 계획 밖)*
+  - HMAC-SHA256 서명 검증을 **SETNX 앞에** — 401 은 멱등키를 안 남긴다
+  - 시크릿 교체 — 신·구 키 병행 검증 + 키별 통과 카운터, 빈·공백 구 키는 "구 키 없음"
+  - 바디를 `byte[]` 로 받아 **PG 가 서명한 바이트 그대로** 검증
 
 ---
 
@@ -237,6 +257,8 @@ curl -X POST http://localhost:8080/orders \
 성공 후 크래시로 200을 못 돌려줘도 재전송이 SETNX 실패로 멈추고(일은 커밋됨), 커밋 **전** 크래시로 키만 남으면 TTL 만료 + 쓸이 배치가 회수한다.
 
 **R(결과)**: 같은 eventId 웹훅 **20회 → 실제 처리 1회**. 멱등 가드를 제거한 음성대조군에서는 `TRANSITIONED 20`이 관측돼(빨간불), 가드가 실제로 막고 있음을 반증으로 확인. *(W1D4 실측)*
+
+> **Week 6 에 앞단이 하나 붙었다 — 서명 검증 → SETNX → 전이.** 이 STAR 의 멱등 처리는 *누가 보냈는지* 를 안 봤다. 검증을 SETNX **뒤에** 두면 위조 요청이 진짜 eventId 로 멱등키를 선점해 진짜 통보가 *"중복"* 으로 버려진다. 순서를 뒤집은 음성대조군에서 **3 red / 4 green**(예상은 1 red) — 셋 다 원인은 하나, *401 이 멱등키를 남긴다.* 정상 순서에선 401·400 이 SETNX 전에 반환돼 키가 안 남고, 그래서 PG 재전송이 막히지 않는다. 같은 이유로 응답 규약의 *"401 이면 재전송하지 말 것"* 을 정정했다 — 401 의 흔한 원인은 위조가 아니라 우리 쪽 시크릿 설정 실수다. *(W6D1 실측, [문서](docs/week6/W6D1_웹훅_서명검증.md))*
 
 ---
 
@@ -269,7 +291,7 @@ curl -X POST http://localhost:8080/orders \
 - 뺄셈을 제거한 음성대조군 → `차변=5002 대변=5001` / `차변=3332 대변=3333` 로 빨간불. **나머지 케이스는 그대로 통과** — 나눠떨어지는 fixture 만 있으면 이 결함이 아무 증상도 안 낸다는 증거
 - 전액환불 시 미지급금 순액 **−1,000**(수수료 미환급 정책의 귀결, W3 정산에서 상계)
 
-*(W2D1~D5 실측. 현재 스위트 **47건 0실패**.)*
+*(W2D1~D5 실측. 당시 스위트 **47건 0실패**.)*
 
 ---
 
@@ -313,7 +335,7 @@ curl -X POST http://localhost:8080/orders \
 
 > ⚠️ **이 문장에는 전제가 하나 붙는다(W4D5 에 발각).** `Sort` 가 붙지 않는 건 플래너가 순서를 보존하는 `Index Scan` 을 고를 때이고, 그 선택은 인덱스 컬럼 순서가 아니라 **힙의 물리적 배치**(`pg_stats.correlation`)가 정한다. 같은 커밋에서 배치가 뒤집히자 같은 쿼리가 `Bitmap Heap Scan` + `Sort` 로 갔다(date corr **1.0000 → 0.0283**, 같은 날짜 40행이 1블록 → **40블록**). 프로덕션 배치는 하루치씩 넣으므로(`CAST(:date AS date)` 한 값 + `GROUP BY seller_id`) 실제 힙은 날짜순으로 쌓이고 전제가 성립한다. **다만 재실행 덮어쓰기(`ON CONFLICT DO UPDATE`)는 새 튜플 버전을 다른 자리에 쓰므로 재실행이 쌓이면 이 전제가 약해질 수 있다 — 그건 아직 안 쟀다.** 그래서 테스트는 `Sort` 를 단언하기 전에 **전제를 먼저 단언**한다.
 
-*(W3D3~D5 실측. 현재 스위트 **92건 0실패**.)*
+*(W3D3~D5 실측. 당시 스위트 **92건 0실패**.)*
 
 ---
 
@@ -374,7 +396,7 @@ curl -X POST http://localhost:8080/orders \
 - 부하는 **로컬 단일 머신**이다(클라이언트·서버·DB·Redis·Kafka 가 CPU 를 나눠 쓴다)
 - **완전 동시가 아니다** — k6 에 배리어가 없다. `PaymentFlowTest` 의 `CyclicBarrier` 20개와는 성질이 다르다(테스트는 좁은 창의 경합을, k6 는 규모를 본다)
 
-*(W4D3~D5 실측. 부하 실행 중 **프로덕션 코드는 한 줄도 안 바뀌었다** — `application.yaml` 두 줄을 graceful 대조군용으로 열었다 되돌렸다. 현재 스위트 **104건 0실패**.)*
+*(W4D3~D5 실측. 부하 실행 중 **프로덕션 코드는 한 줄도 안 바뀌었다** — `application.yaml` 두 줄을 graceful 대조군용으로 열었다 되돌렸다. 당시 스위트 **104건 0실패**.)*
 
 ---
 
@@ -448,7 +470,7 @@ curl -X POST http://localhost:8080/orders \
 - 부하는 **로컬 단일 머신**에 인스턴스 3개다
 - **인덱스로 고정한 타임아웃 비율은 소비자가 하나일 때만 성립한다**(이번에 발각): 인스턴스가 여럿이면 각자 부분집합을 받아 앞 10건 창에서 회로가 열릴 수 있다 — 30%에서 한 인스턴스가 열려 **10%로 낮춰야** 셋 다 닫힌 채 끝났다
 
-*(W5D1~D5 + 마무리 실측. 현재 스위트 **171건 0실패**.)*
+*(W5D1~D5 + 마무리 실측. 당시 스위트 **171건 0실패**.)*
 
 ---
 
@@ -469,3 +491,16 @@ curl -X POST http://localhost:8080/orders \
 - [`week3/W3D3_정산배치.md`](docs/week3/W3D3_정산배치.md) — 저장을 채택한 기준, 덮어쓰기가 복구가 되는 이유, 커밋 가시성 구멍
 - [`week3/W3D4_대사.md`](docs/week3/W3D4_대사.md) — 독립 원천, 두 축, 조인 키를 바꾼 이유
 - [`week3/W3D5_스냅샷_불일치플래그.md`](docs/week3/W3D5_스냅샷_불일치플래그.md) — 귀속/진행 축 분리, 관측 누적, 날짜 출처 셋
+- [`week4/W4D1_PG차단기.md`](docs/week4/W4D1_PG차단기.md) — resilience4j CircuitBreaker
+- [`week4/W4D2_관측성.md`](docs/week4/W4D2_관측성.md) — Prometheus + Grafana, 정산 배치·대사 관측
+- [`week4/W4D3_k6_시나리오설계.md`](docs/week4/W4D3_k6_시나리오설계.md) — 웹훅 중복 폭주 · 결함 주입 설계
+- [`week4/W4D4_k6실행_결과분석.md`](docs/week4/W4D4_k6실행_결과분석.md) — k6 본 실행 + 결과 분석
+- [`week4/W4D5_회귀_안정화.md`](docs/week4/W4D5_회귀_안정화.md) — 전체 회귀 + 버그 픽스
+- [`week5/W5D1_구독_상태머신.md`](docs/week5/W5D1_구독_상태머신.md) — 계획서 상태머신 폐기, 주기를 행으로
+- [`week5/W5D2_재시도_스케줄러.md`](docs/week5/W5D2_재시도_스케줄러.md) — 폴링 + 리스(CAS), Quartz 폐기
+- [`week5/W5D3_웹훅_라우팅과_멱등_반증.md`](docs/week5/W5D3_웹훅_라우팅과_멱등_반증.md) — 웹훅 라우팅, 멱등키 반증
+- [`week5/W5D4_재전송으로_이중청구_창_닫기.md`](docs/week5/W5D4_재전송으로_이중청구_창_닫기.md) — 같은 키 재전송으로 이중 청구 창 닫기
+- [`week5/W5D5_아무도_안_재던_자리.md`](docs/week5/W5D5_아무도_안_재던_자리.md) — 아무도 안 재던 자리 셋
+- [`week6/W6D1_웹훅_서명검증.md`](docs/week6/W6D1_웹훅_서명검증.md) — 서명 검증을 멱등 처리 앞에, 401 규약 정정
+- [`week6/W6D2_웹훅_시크릿교체.md`](docs/week6/W6D2_웹훅_시크릿교체.md) — 신·구 키 병행 검증, 공백 구 키, `byte[]` 전환
+- 회고: [`W4`](docs/week4/W4_회고.md) · [`W5`](docs/week5/W5_회고.md) · [`W5 마무리`](docs/week5/W5_마무리.md)
